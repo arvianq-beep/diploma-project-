@@ -1,0 +1,9 @@
+duration,protocol_type,service,src_bytes,dst_bytes,attack_type,label
+0,tcp,http,215,450,normal,0
+0,tcp,private,0,0,neptune,1
+0,udp,domain_u,45,130,normal,0
+0,tcp,http,230,1200,normal,0
+1,tcp,ftp,0,0,warezclient,1
+0,icmp,ecr_i,8,0,smurf,1
+0,tcp,http,300,2050,normal,0
+2,tcp,telnet,0,0,guess_passwd,1
