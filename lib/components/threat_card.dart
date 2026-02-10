@@ -3,109 +3,105 @@ import '../models/threat_model.dart';
 
 class ThreatCard extends StatelessWidget {
   final ThreatLog log;
-
   const ThreatCard({super.key, required this.log});
 
   @override
   Widget build(BuildContext context) {
+    // Если это не угроза, не показываем ничего (или можно показывать зеленый лог)
     if (!log.isThreat) return const SizedBox.shrink();
 
     final bool isSecure = log.isVerified;
-    final Color borderColor = isSecure ? Colors.red : Colors.orange;
-    final IconData statusIcon = isSecure ? Icons.gpp_bad : Icons.warning_amber;
+    // Красный для подтвержденных угроз, Оранжевый для атак на ИИ (Adversarial)
+    final Color accentColor = isSecure
+        ? const Color(0xFFFF3366)
+        : Colors.orangeAccent;
 
-    return Card(
-      elevation: 2,
-      margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 0),
-      color: Colors.white,
-      shape: RoundedRectangleBorder(
-        side: BorderSide(color: borderColor, width: 2),
-        borderRadius: BorderRadius.circular(10),
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 0),
+      decoration: BoxDecoration(
+        color: const Color(0xFF020617), // Темный фон
+        border: Border(left: BorderSide(color: accentColor, width: 4)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.3),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
-      // Делаем карточку кликабельной через InkWell
       child: InkWell(
-        borderRadius: BorderRadius.circular(10),
-        onTap: () => _showDetailsDialog(context), // При клике открываем диалог
+        onTap: () => _showDetailsDialog(context),
         child: Padding(
           padding: const EdgeInsets.all(12.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Заголовок
+              // Верхняя строка: Тип и Время
               Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Icon(statusIcon, color: borderColor),
-                  const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      log.threatType,
-                      style: const TextStyle(
-                        fontSize: 16,
+                      log.threatType.toUpperCase(),
+                      style: TextStyle(
+                        color: accentColor,
+                        fontFamily: 'monospace',
                         fontWeight: FontWeight.bold,
+                        fontSize: 13,
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   Text(
                     log.timestamp,
-                    style: const TextStyle(color: Colors.grey),
+                    style: const TextStyle(
+                      color: Colors.blueGrey,
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                    ),
                   ),
-                  const SizedBox(width: 8),
-                  const Icon(Icons.info_outline, size: 16, color: Colors.grey),
                 ],
               ),
               const SizedBox(height: 8),
 
-              Text("Source IP: ${log.sourceIp} | Protocol: ${log.protocol}"),
+              // Средняя строка: IP и Протокол
+              Text(
+                "SRC: ${log.sourceIp} | PROTO: ${log.protocol}",
+                style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                ),
+              ),
               const SizedBox(height: 8),
 
-              // Блок уверенности
+              // Нижний блок: Уверенность ИИ
               Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.grey[100],
-                  borderRadius: BorderRadius.circular(5),
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                color: const Color(0xFF0F172A),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      "AI Confidence: ${(log.aiConfidence * 100).toStringAsFixed(1)}%",
+                      "AI_CONF: ${(log.aiConfidence * 100).toStringAsFixed(1)}%",
+                      style: const TextStyle(
+                        color: Colors.cyanAccent,
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                      ),
                     ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
-                        vertical: 2,
-                      ),
-                      decoration: BoxDecoration(
-                        color: isSecure ? Colors.red[50] : Colors.orange[50],
-                        border: Border.all(color: borderColor),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(
-                        isSecure ? "VERIFIED THREAT" : "ADVERSARIAL SUSPICION",
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold,
-                          color: borderColor,
-                        ),
+                    Text(
+                      isSecure ? "[ BLOCKED ]" : "[ ADVERSARIAL DETECTED ]",
+                      style: TextStyle(
+                        color: accentColor,
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                        fontFamily: 'monospace',
                       ),
                     ),
                   ],
                 ),
               ),
-
-              if (!isSecure) ...[
-                const SizedBox(height: 5),
-                Text(
-                  "Warning: ${log.verificationDetails}",
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: Colors.orange,
-                    fontStyle: FontStyle.italic,
-                  ),
-                ),
-              ],
             ],
           ),
         ),
@@ -113,76 +109,106 @@ class ThreatCard extends StatelessWidget {
     );
   }
 
-  // Всплывающее окно с "техническими деталями" (Deep Packet Inspection)
   void _showDetailsDialog(BuildContext context) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Row(
-          children: [
-            const Icon(Icons.analytics, color: Colors.indigo),
-            const SizedBox(width: 10),
-            const Text("Deep Packet Inspection"),
-          ],
+        backgroundColor: const Color(0xFF020617),
+        shape: const RoundedRectangleBorder(
+          side: BorderSide(color: Color(0xFF1E293B)),
+        ),
+        title: const Text(
+          "DEEP_PACKET_INSPECTION",
+          style: TextStyle(
+            color: Colors.white,
+            fontFamily: 'monospace',
+            fontSize: 14,
+          ),
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _detailRow("Timestamp:", log.timestamp),
-            _detailRow("Source IP:", log.sourceIp),
-            _detailRow("Destination IP:", "192.168.1.5 (Server)"),
-            _detailRow("Protocol:", log.protocol),
-            const Divider(),
-            _detailRow("Threat Class:", log.threatType),
-            _detailRow(
-              "AI Confidence:",
-              "${(log.aiConfidence * 100).toStringAsFixed(4)}%",
+            _row("TIMESTAMP", log.timestamp),
+            _row("SOURCE_IP", log.sourceIp),
+            _row("PROTOCOL", log.protocol),
+            const Divider(color: Colors.white12),
+            _row("AI_SCORE", "${(log.aiConfidence * 100).toStringAsFixed(4)}%"),
+            _row(
+              "STATUS",
+              log.isVerified ? "KNOWN_SIGNATURE" : "AI_PREDICTION",
             ),
-            _detailRow(
-              "Verification:",
-              log.isVerified ? "Passed" : "Failed (Adversarial)",
-            ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
             const Text(
-              "Raw Payload Header:",
-              style: TextStyle(fontWeight: FontWeight.bold),
+              "PAYLOAD_HEX:",
+              style: TextStyle(
+                color: Colors.blueGrey,
+                fontSize: 10,
+                fontFamily: 'monospace',
+              ),
             ),
+            const SizedBox(height: 4),
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(8),
-              color: Colors.black12,
-              child: Text(
-                "0x45 0x00 0x05 0xdc 0x1a 0x2b 0x40 0x00\n0x40 0x${log.protocol == 'TCP' ? '06' : '11'} 0x3d 0xb2 ...",
-                style: const TextStyle(fontFamily: 'Courier', fontSize: 12),
+              color: Colors.black,
+              child: const Text(
+                "0x45 0x00 0x05 0xdc 0x1a 0x2b 0x40 0x00\n0x40 0x06 0x3d 0xb2 0xc0 0xa8 0x01 0x05...",
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 10,
+                  color: Colors.greenAccent,
+                ),
               ),
             ),
+            if (!log.isVerified) ...[
+              const SizedBox(height: 10),
+              Text(
+                ">> WARNING: ${log.verificationDetails}",
+                style: const TextStyle(
+                  color: Colors.orangeAccent,
+                  fontSize: 10,
+                  fontFamily: 'monospace',
+                ),
+              ),
+            ],
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text("CLOSE REPORT"),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text(
+              "CLOSE",
+              style: TextStyle(color: Colors.cyanAccent),
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _detailRow(String label, String value) {
+  Widget _row(String l, String v) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2.0),
+      padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(
-            label,
+            l,
             style: const TextStyle(
-              fontWeight: FontWeight.w500,
-              color: Colors.grey,
+              color: Colors.blueGrey,
+              fontSize: 10,
+              fontFamily: 'monospace',
             ),
           ),
-          Text(value, style: const TextStyle(fontWeight: FontWeight.bold)),
+          Text(
+            v,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 10,
+              fontFamily: 'monospace',
+            ),
+          ),
         ],
       ),
     );

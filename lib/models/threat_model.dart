@@ -1,14 +1,16 @@
 class ThreatLog {
-  final String timestamp;
+  final String id;
+  final String timestamp; // Строка, чтобы избежать ошибок с DateTime
   final String sourceIp;
   final String protocol;
   final String threatType;
   final bool isThreat;
-  final double aiConfidence;
+  final double aiConfidence; // Внимание: именно aiConfidence
   final bool isVerified;
   final String verificationDetails;
 
   ThreatLog({
+    required this.id,
     required this.timestamp,
     required this.sourceIp,
     required this.protocol,
@@ -21,14 +23,17 @@ class ThreatLog {
 
   factory ThreatLog.fromJson(Map<String, dynamic> json) {
     return ThreatLog(
-      timestamp: json['timestamp'] ?? "",
-      sourceIp: json['source_ip'] ?? "Unknown",
-      protocol: json['protocol'] ?? "TCP",
-      threatType: json['threat_type'] ?? "Normal",
+      id:
+          json['id']?.toString() ??
+          DateTime.now().millisecondsSinceEpoch.toString(),
+      timestamp: json['timestamp']?.toString() ?? "",
+      sourceIp: json['source_ip']?.toString() ?? "Unknown",
+      protocol: json['protocol']?.toString() ?? "TCP",
+      threatType: json['threat_type']?.toString() ?? "Normal",
       isThreat: json['is_threat'] ?? false,
       aiConfidence: (json['ai_confidence'] ?? 0.0).toDouble(),
       isVerified: json['is_verified'] ?? false,
-      verificationDetails: json['verification_details'] ?? "",
+      verificationDetails: json['verification_details']?.toString() ?? "",
     );
   }
 }
