@@ -1,23 +1,20 @@
 import 'package:flutter/material.dart';
-import 'pages/main_page.dart';
+import 'Features/Home/Home_page.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(const DiplomaApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class DiplomaApp extends StatelessWidget {
+  const DiplomaApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Diploma Project',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
-      ),
-      home: const MainPage(),
+      title: 'Secure Decision-Making IDS',
+      theme: ThemeData(useMaterial3: true),
+      home: const HomePage(),
     );
   }
 }
