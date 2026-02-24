@@ -23,12 +23,19 @@ class HomeViewModel extends ChangeNotifier {
   final List<AnalysisResult> _history = [];
   List<AnalysisResult> get history => List.unmodifiable(_history);
 
+  /// ✅ Кол-во вкладок (Dashboard, Alerts, Reports, Datasets)
+  static const int tabsCount = 4;
+
   void setIndex(int i) {
+    // ✅ защита: индекс всегда 0..tabsCount-1
+    if (i < 0) i = 0;
+    if (i >= tabsCount) i = tabsCount - 1;
+
     _index = i;
     notifyListeners();
   }
 
-  Future<void> runDemoAnalysis() async {
+  Future<void> runDemoAnalysis({bool goToAlerts = true}) async {
     _isLoading = true;
     _error = null;
     notifyListeners();
@@ -39,9 +46,14 @@ class HomeViewModel extends ChangeNotifier {
 
       _lastResult = result;
       _history.insert(0, result);
-      _index = 1; // после анализа → Alerts
+
+      // ✅ НЕ ломаем навигацию: переключаемся только если явно нужно
+      if (goToAlerts) {
+        setIndex(1); // Alerts
+      }
     } catch (e) {
       _error = e.toString();
+      notifyListeners();
     } finally {
       _isLoading = false;
       notifyListeners();

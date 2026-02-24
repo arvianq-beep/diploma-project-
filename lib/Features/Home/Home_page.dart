@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:diploma_application_ml/Features/Views/dashboard_view.dart';
 import 'package:diploma_application_ml/Features/views/alerts_view.dart';
 import 'package:diploma_application_ml/Features/Views/reports_view.dart';
-
+import 'package:diploma_application_ml/Features/views/datasets_view.dart'; // ✅ добавь
 
 import 'home_view_model.dart';
 
@@ -24,11 +24,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
-
-    // Один общий ApiService для всего приложения
     api = const ApiService(baseUrl: kBackendBaseUrl);
-
-    // ViewModel использует тот же ApiService
     vm = HomeViewModel(api: api);
   }
 
@@ -47,6 +43,7 @@ class _HomePageState extends State<HomePage> {
           DashboardView(vm: vm),
           AlertsView(vm: vm),
           ReportsView(api: api),
+          DatasetsView(api: api), // ✅ добавили страницу
         ];
 
         return Scaffold(
@@ -67,6 +64,11 @@ class _HomePageState extends State<HomePage> {
               NavigationDestination(
                 icon: Icon(Icons.article_outlined),
                 label: 'Reports',
+              ),
+              NavigationDestination(
+                // ✅ добавили вкладку
+                icon: Icon(Icons.dataset_outlined),
+                label: 'Datasets',
               ),
             ],
           ),
