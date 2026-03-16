@@ -189,6 +189,11 @@ class _EventSelector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final selectedValue =
+        controller.sampleEvents.any((event) => event.id == selected?.id)
+        ? selected?.id
+        : null;
+
     return SectionCard(
       title: 'Sample input event',
       subtitle:
@@ -197,7 +202,7 @@ class _EventSelector extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           DropdownButtonFormField<String>(
-            value: selected?.id,
+            value: selectedValue,
             items: controller.sampleEvents
                 .map(
                   (event) => DropdownMenuItem<String>(
@@ -214,6 +219,13 @@ class _EventSelector extends StatelessWidget {
             },
             decoration: const InputDecoration(labelText: 'Demo sample'),
           ),
+          if (selectedValue == null && selected != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              'Imported CSV event selected: ${selected!.title}',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ],
           const SizedBox(height: 16),
           if (selected != null) _EventSummary(event: selected!),
           const SizedBox(height: 18),
