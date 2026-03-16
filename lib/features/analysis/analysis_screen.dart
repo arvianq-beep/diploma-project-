@@ -153,7 +153,19 @@ class AnalysisScreen extends StatelessWidget {
                   runSpacing: 12,
                   children: [
                     FilledButton.icon(
-                      onPressed: controller.submitLatestForReview,
+                      onPressed: () {
+                        controller.submitLatestForReview();
+                        final reviewIncident =
+                            controller.latestIncident ?? incident;
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => EventDetailsScreen(
+                              controller: controller,
+                              incident: reviewIncident,
+                            ),
+                          ),
+                        );
+                      },
                       icon: const Icon(Icons.fact_check_outlined),
                       label: const Text('Send to analyst review'),
                     ),

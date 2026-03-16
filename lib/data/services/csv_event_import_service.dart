@@ -33,6 +33,27 @@ class CsvEventImportService {
     Map<String, String> row,
     String fileName,
   ) {
+    String normalizeProtocol(String value) {
+      final normalized = value.trim();
+      switch (normalized) {
+        case '6':
+          return 'TCP';
+        case '17':
+          return 'UDP';
+        case '1':
+          return 'ICMP';
+        default:
+          return normalized.isEmpty ? 'UNKNOWN' : normalized.toUpperCase();
+      }
+    }
+
+    DateTime parseTimestamp(String raw) {
+      if (raw.trim().isEmpty) {
+        return DateTime.now();
+      }
+      return DateTime.tryParse(raw) ?? DateTime.now();
+    }
+
     String read(List<String> keys, [String fallback = '']) {
       for (final key in keys) {
         for (final entry in row.entries) {
@@ -68,6 +89,8 @@ class CsvEventImportService {
     final forwardBytes = readDouble([
       'forward_bytes',
       'sbytes',
+      'Flow Bytes/s',
+      'Flow Byts/s',
       'TotLen Fwd Pkts',
       'Total Length of Fwd Packets',
     ]);
@@ -77,6 +100,12 @@ class CsvEventImportService {
       'TotLen Bwd Pkts',
       'Total Length of Bwd Packets',
     ]);
+    final flowBytesPerSecond = readDouble([
+      'Flow Bytes/s',
+      'Flow Byts/s',
+      'bytes_per_second',
+      'flow_bytes_per_second',
+    ]);
     var totalBytes = readDouble([
       'bytes_transferred_kb',
       'bytes',
@@ -85,33 +114,73 @@ class CsvEventImportService {
     if (totalBytes == 0) {
       totalBytes = (forwardBytes + backwardBytes) / 1024;
     }
+    if (totalBytes == 0 && flowBytesPerSecond > 0 && duration > 0) {
+      totalBytes = (flowBytesPerSecond * duration) / 1024;
+    }
 
-    final totalPackets = readDouble([
-      'total_packets',
+    final forwardPackets = readDouble([
+      'forward_packets',
       'spkts',
-      'dpkts',
       'Tot Fwd Pkts',
+      'Total Fwd Packets',
     ], 0);
+    final backwardPackets = readDouble([
+      'backward_packets',
+      'dpkts',
+      'Tot Bwd Pkts',
+      'Total Backward Packets',
+    ], 0);
+    final totalPackets = forwardPackets + backwardPackets;
     var packetsPerSecond = readDouble([
       'packets_per_second',
       'Flow Packets/s',
+      'Flow Pkts/s',
       'rate',
     ], 0);
     if (packetsPerSecond == 0 && duration > 0) {
       packetsPerSecond = totalPackets / duration;
     }
 
+    final protocol = normalizeProtocol(
+      read(['protocol', 'proto', 'Protocol'], 'UNKNOWN'),
+    );
+    final sourceIp = read([
+      'source_ip',
+      'srcip',
+      'Src IP',
+      'Source IP',
+    ], '0.0.0.0');
+    final destinationIp = read([
+      'destination_ip',
+      'dstip',
+      'Dst IP',
+      'Destination IP',
+    ], '0.0.0.0');
+    final sourcePort = readInt([
+      'source_port',
+      'sport',
+      'Src Port',
+      'Source Port',
+    ]);
+    final destinationPort = readInt([
+      'destination_port',
+      'dsport',
+      'Destination Port',
+      'Dst Port',
+    ]);
+    final label = read(['Label', 'label', 'attack_cat'], '');
+    final repeatedAttempts = packetsPerSecond > 400 || destinationPort == 22;
+    final offHoursActivity = false;
+    final knownBadSource =
+        sourceIp.startsWith('185.') || sourceIp.startsWith('45.');
+
     final anomalyScore = _deriveAnomalyScore(
       packetsPerSecond: packetsPerSecond,
       bytesTransferredKb: totalBytes,
-      destinationPort: readInt([
-        'destination_port',
-        'dsport',
-        'Destination Port',
-      ]),
+      destinationPort: destinationPort,
     );
     final contextRisk = _deriveContextRisk(
-      protocol: read(['protocol', 'proto', 'Protocol'], 'UNKNOWN'),
+      protocol: protocol,
       packetsPerSecond: packetsPerSecond,
       bytesTransferredKb: totalBytes,
     );
@@ -119,16 +188,14 @@ class CsvEventImportService {
     return ThreatEvent(
       id: 'csv-$index',
       title: 'CSV Event $index',
-      description: 'Imported from $fileName',
-      sourceIp: read(['source_ip', 'srcip', 'Src IP'], '0.0.0.0'),
-      destinationIp: read(['destination_ip', 'dstip', 'Dst IP'], '0.0.0.0'),
-      sourcePort: readInt(['source_port', 'sport', 'Src Port']),
-      destinationPort: readInt([
-        'destination_port',
-        'dsport',
-        'Destination Port',
-      ]),
-      protocol: read(['protocol', 'proto', 'Protocol'], 'UNKNOWN'),
+      description: label.isEmpty
+          ? 'Imported from $fileName'
+          : 'Imported from $fileName with dataset label $label',
+      sourceIp: sourceIp,
+      destinationIp: destinationIp,
+      sourcePort: sourcePort,
+      destinationPort: destinationPort,
+      protocol: protocol,
       bytesTransferredKb: totalBytes,
       durationSeconds: duration,
       packetsPerSecond: packetsPerSecond,
@@ -136,14 +203,19 @@ class CsvEventImportService {
       anomalyScore: anomalyScore,
       contextRiskScore: contextRisk,
       knownBadSource:
-          read(['known_bad_source'], 'false').toLowerCase() == 'true',
+          read(['known_bad_source'], 'false').toLowerCase() == 'true' ||
+          knownBadSource,
       offHoursActivity:
-          read(['off_hours_activity'], 'false').toLowerCase() == 'true',
+          read(['off_hours_activity'], 'false').toLowerCase() == 'true' ||
+          offHoursActivity,
       repeatedAttempts:
-          read(['repeated_attempts'], 'false').toLowerCase() == 'true',
+          read(['repeated_attempts'], 'false').toLowerCase() == 'true' ||
+          repeatedAttempts,
       sampleSource: 'CSV Import',
-      capturedAt: DateTime.now(),
-      tags: const ['csv-import'],
+      capturedAt: parseTimestamp(
+        read(['Timestamp', 'timestamp', 'captured_at'], ''),
+      ),
+      tags: ['csv-import', if (label.isNotEmpty) 'dataset-label:$label'],
     );
   }
 

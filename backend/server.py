@@ -108,6 +108,14 @@ def _csv_dict_reader_from_upload(file_storage):
 
 
 def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> dict:
+    def normalize_protocol(value: str) -> str:
+        normalized = str(value).strip()
+        return {
+            "6": "TCP",
+            "17": "UDP",
+            "1": "ICMP",
+        }.get(normalized, normalized.upper() if normalized else "UNKNOWN")
+
     def read(*keys, default=""):
         for key in keys:
             if key in row and str(row[key]).strip() != "":
@@ -140,37 +148,52 @@ def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> d
         "Total Length of Fwd Packets",
         default=0.0,
     ) / 1024.0
+    flow_bytes_per_second = read_float(
+        "Flow Bytes/s", "Flow Byts/s", "bytes_per_second", "flow_bytes_per_second", default=0.0
+    )
+    if bytes_kb == 0.0 and flow_bytes_per_second > 0 and duration > 0:
+        bytes_kb = (flow_bytes_per_second * duration) / 1024.0
+    forward_packets = read_float(
+        "forward_packets", "spkts", "Tot Fwd Pkts", "Total Fwd Packets", default=0.0
+    )
+    backward_packets = read_float(
+        "backward_packets", "dpkts", "Tot Bwd Pkts", "Total Backward Packets", default=0.0
+    )
     packets_per_second = read_float(
-        "packets_per_second",
-        "Flow Packets/s",
-        "rate",
-        default=0.0,
+        "packets_per_second", "Flow Packets/s", "Flow Pkts/s", "rate", default=0.0
     )
     if packets_per_second == 0.0 and duration > 0:
-        total_packets = read_float("spkts", "dpkts", "Tot Fwd Pkts", "Tot Bwd Pkts", default=0.0)
+        total_packets = forward_packets + backward_packets
         packets_per_second = total_packets / duration if duration else 0.0
+
+    protocol = normalize_protocol(read("protocol", "proto", "Protocol", default="UNKNOWN"))
+    source_ip = read("source_ip", "srcip", "Src IP", "Source IP", default="0.0.0.0")
+    destination_ip = read("destination_ip", "dstip", "Dst IP", "Destination IP", default="0.0.0.0")
+    source_port = read_int("source_port", "sport", "Src Port", "Source Port", default=0)
+    destination_port = read_int("destination_port", "dsport", "Destination Port", "Dst Port", default=0)
+    label = read("Label", "label", "attack_cat", default="")
 
     return {
         "id": f"csv-{row_index}",
         "title": f"CSV Event {row_index}",
-        "description": f"Imported from {filename}",
-        "source_ip": read("source_ip", "srcip", "Src IP", default="0.0.0.0"),
-        "destination_ip": read("destination_ip", "dstip", "Dst IP", default="0.0.0.0"),
-        "source_port": read_int("source_port", "sport", "Src Port", default=0),
-        "destination_port": read_int("destination_port", "dsport", "Destination Port", default=0),
-        "protocol": read("protocol", "proto", "Protocol", default="UNKNOWN"),
+        "description": f"Imported from {filename}" if not label else f"Imported from {filename} with dataset label {label}",
+        "source_ip": source_ip,
+        "destination_ip": destination_ip,
+        "source_port": source_port,
+        "destination_port": destination_port,
+        "protocol": protocol,
         "bytes_transferred_kb": max(bytes_kb, 0.0),
         "duration_seconds": max(duration, 0.0),
         "packets_per_second": max(packets_per_second, 0.0),
         "failed_logins": read_int("failed_logins", default=0),
         "anomaly_score": min(max(read_float("anomaly_score", default=0.0), 0.0), 1.0),
         "context_risk_score": min(max(read_float("context_risk_score", default=0.0), 0.0), 1.0),
-        "known_bad_source": str(read("known_bad_source", default="false")).lower() == "true",
+        "known_bad_source": str(read("known_bad_source", default="false")).lower() == "true" or source_ip.startswith(("185.", "45.")),
         "off_hours_activity": str(read("off_hours_activity", default="false")).lower() == "true",
-        "repeated_attempts": str(read("repeated_attempts", default="false")).lower() == "true",
+        "repeated_attempts": str(read("repeated_attempts", default="false")).lower() == "true" or packets_per_second > 400 or destination_port == 22,
         "sample_source": f"CSV Import: {filename}",
         "captured_at": datetime.now(timezone.utc).isoformat(),
-        "tags": ["csv-import"],
+        "tags": ["csv-import", *([f"dataset-label:{label}"] if label else [])],
     }
 
 
