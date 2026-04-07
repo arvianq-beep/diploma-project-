@@ -288,6 +288,12 @@ These metrics are stored in:
 
 - `backend/ml/artifacts/evaluation_metrics.json`
 
+Repository note:
+
+- `backend/ml/artifacts/model_info.json` and `backend/ml/artifacts/evaluation_metrics.json` are suitable for version control
+- `backend/ml/artifacts/rf_ids_model.joblib` is intentionally kept out of git because it is a large binary artifact
+- if you want to distribute a pre-trained model together with the repository, use Git LFS or attach the artifact separately
+
 ### Important note about the current repository state
 
 The codebase now supports real training and evaluation on `CIC-IDS2017` and `CIC-UNSW-NB15 (Augmented)`, but those full datasets are not currently present in this repository.

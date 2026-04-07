@@ -1,0 +1,22 @@
+{
+  "model_name": "Random Forest",
+  "model_version": "rf-cic-unsw-v1",
+  "features": [
+    "protocol",
+    "source_port",
+    "destination_port",
+    "duration",
+    "forward_packets",
+    "backward_packets",
+    "forward_bytes",
+    "backward_bytes",
+    "bytes_per_second",
+    "packets_per_second"
+  ],
+  "train_dataset": "CIC-IDS2017",
+  "cross_dataset": null,
+  "artifacts": {
+    "model_path": "/Users/madimuratbay/MyApp/diploma_application_ml/backend/ml/artifacts/rf_ids_model.joblib",
+    "metrics_path": "/Users/madimuratbay/MyApp/diploma_application_ml/backend/ml/artifacts/evaluation_metrics.json"
+  }
+}

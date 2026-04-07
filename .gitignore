@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# ML artifacts
+# Keep lightweight metadata/metrics in git, but ignore the heavy trained model binary.
+/backend/ml/artifacts/rf_ids_model.joblib

@@ -16,6 +16,10 @@ class DatasetBundle:
     labels: pd.Series
     dataset_name: str
     source_files: list[str]
+    dataset_audit: list[dict]
+    rows_before_dedup: int
+    rows_after_dedup: int
+    merged_duplicates_removed: int
 
 
 def _find_column(columns: Iterable[str], aliases: list[str]) -> str | None:
@@ -56,6 +60,12 @@ def _empty_series(length: int, fill_value=0.0) -> pd.Series:
     return pd.Series([fill_value] * length)
 
 
+def _clean_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    cleaned = frame.copy()
+    cleaned.columns = [str(column).strip() for column in cleaned.columns]
+    return cleaned.replace([np.inf, -np.inf], np.nan)
+
+
 def _label_to_binary(series: pd.Series) -> pd.Series:
     def normalize(value) -> int:
         if pd.isna(value):
@@ -73,6 +83,7 @@ def _label_to_binary(series: pd.Series) -> pd.Series:
 
 
 def harmonize_frame(frame: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
+    frame = _clean_frame(frame)
     aliases = CIC_COLUMN_ALIASES if dataset_name == "cic_ids2017" else UNSW_COLUMN_ALIASES
     length = len(frame)
     output = pd.DataFrame(index=frame.index)
@@ -137,25 +148,71 @@ def load_dataset_bundle(dataset_dir: str | Path, dataset_name: str) -> DatasetBu
     frames: list[pd.DataFrame] = []
     labels: list[pd.Series] = []
     source_files: list[str] = []
+    dataset_audit: list[dict] = []
+    rows_before_dedup = 0
+    rows_after_dedup = 0
 
     for csv_path in csv_files:
-        frame = pd.read_csv(csv_path, low_memory=False)
+        raw_frame = pd.read_csv(csv_path, low_memory=False)
+        frame = raw_frame.copy()
+        frame.columns = [str(column).strip() for column in frame.columns]
+        numeric_part = frame.select_dtypes(include=[np.number])
+        inf_values = int(np.isinf(numeric_part.to_numpy()).sum()) if not numeric_part.empty else 0
+        missing_before = int(frame.isna().sum().sum())
+        duplicate_rows = int(frame.duplicated().sum())
+        rows_before_dedup += int(len(frame))
+
+        frame = frame.replace([np.inf, -np.inf], np.nan)
+        missing_after_inf = int(frame.isna().sum().sum())
+        frame = frame.drop_duplicates().reset_index(drop=True)
+        rows_after_dedup += int(len(frame))
+
         label_column = _find_column(frame.columns, ["Label", "label", "attack_cat", "attack_cat ", "attack"])
         if label_column is None and "label" in frame.columns:
             label_column = "label"
         if label_column is None:
             raise ValueError(f"Label column not found in {csv_path}")
 
+        binary_labels = _label_to_binary(frame[label_column])
         frames.append(harmonize_frame(frame, dataset_name))
-        labels.append(_label_to_binary(frame[label_column]))
+        labels.append(binary_labels)
         source_files.append(csv_path.name)
+        dataset_audit.append(
+            {
+                "file": csv_path.name,
+                "rows": int(len(raw_frame)),
+                "rows_after_dedup": int(len(frame)),
+                "columns": [str(column).strip() for column in raw_frame.columns],
+                "label_column": label_column,
+                "missing_values_before_cleaning": missing_before,
+                "missing_values_after_inf_replacement": missing_after_inf,
+                "inf_values": inf_values,
+                "duplicate_rows_removed": duplicate_rows,
+                "raw_label_distribution": frame[label_column].astype(str).str.strip().value_counts(dropna=False).to_dict(),
+                "binary_label_distribution": {
+                    str(key): int(value)
+                    for key, value in binary_labels.value_counts(dropna=False).sort_index().to_dict().items()
+                },
+            }
+        )
 
     merged_frame = pd.concat(frames, ignore_index=True)
     merged_labels = pd.concat(labels, ignore_index=True)
+    merged = merged_frame.copy()
+    merged["_target"] = merged_labels.to_numpy()
+    merged_duplicates_removed = int(merged.duplicated().sum())
+    if merged_duplicates_removed:
+        merged = merged.drop_duplicates().reset_index(drop=True)
+    merged_labels = merged.pop("_target").astype(int)
+    merged_frame = merged
 
     return DatasetBundle(
         frame=merged_frame,
         labels=merged_labels,
         dataset_name=dataset_name,
         source_files=source_files,
+        dataset_audit=dataset_audit,
+        rows_before_dedup=rows_before_dedup,
+        rows_after_dedup=rows_after_dedup,
+        merged_duplicates_removed=merged_duplicates_removed,
     )

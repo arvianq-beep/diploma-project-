@@ -89,8 +89,11 @@ def metrics_from_predictions(y_true, y_pred, y_score) -> dict:
         "accuracy": round(float(accuracy_score(y_true, y_pred)), 4),
         "precision": round(float(precision_score(y_true, y_pred, zero_division=0)), 4),
         "recall": round(float(recall_score(y_true, y_pred, zero_division=0)), 4),
+        "attack_recall": round(float(recall_score(y_true, y_pred, zero_division=0)), 4),
         "f1_score": round(float(f1_score(y_true, y_pred, zero_division=0)), 4),
         "false_positive_rate": round(float(fp / (fp + tn)) if (fp + tn) else 0.0, 4),
+        "false_positives": int(fp),
+        "predicted_attack_ratio": round(float(pd.Series(y_pred).mean()), 4),
         "roc_auc": round(float(roc_auc_score(y_true, y_score)), 4),
         "pr_auc": round(float(average_precision_score(y_true, y_score)), 4),
         "confusion_matrix": {
@@ -145,6 +148,17 @@ def train(cic_path: str, unsw_path: str | None = None) -> dict:
             "features": CANONICAL_FEATURES,
             "train_dataset": "CIC-IDS2017",
             "cross_dataset_evaluation": "CIC-UNSW-NB15 (Augmented)" if unsw_path else None,
+        },
+        "data_summary": {
+            "cic_rows_before_dedup": int(cic_bundle.rows_before_dedup),
+            "cic_rows_after_file_dedup": int(cic_bundle.rows_after_dedup),
+            "cic_merged_duplicates_removed": int(cic_bundle.merged_duplicates_removed),
+            "cic_rows_used_for_training": int(len(cic_bundle.frame)),
+            "cic_binary_distribution": {
+                str(key): int(value)
+                for key, value in cic_bundle.labels.value_counts(dropna=False).sort_index().to_dict().items()
+            },
+            "cic_files": cic_bundle.dataset_audit,
         },
         "validation": metrics_from_predictions(y_val, val_pred, val_prob),
         "test": metrics_from_predictions(y_test, test_pred, test_prob),
