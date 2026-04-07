@@ -21,171 +21,216 @@ class AnalysisScreen extends StatelessWidget {
     final selected = controller.selectedEvent;
     final batchSummary = controller.lastBatchSummary;
 
-    return ListView(
-      padding: const EdgeInsets.all(20),
+    return Stack(
       children: [
-        Text(
-          'Analysis Pipeline',
-          style: Theme.of(context).textTheme.headlineMedium,
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Run a sample through the trained ML model when the backend is available, then pass the raw output to the verification layer.',
-          style: Theme.of(context).textTheme.bodyLarge,
-        ),
-        const SizedBox(height: 20),
-        SectionCard(
-          title: 'ML inference status',
-          subtitle:
-              'The Flutter app requests raw AI predictions from the Python backend and then applies verification locally.',
-          child: Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              Chip(label: Text('Mode: ${controller.modelInfo.dataMode}')),
-              Chip(label: Text('Model: ${controller.modelInfo.modelName}')),
-              Chip(
-                label: Text('Version: ${controller.modelInfo.modelVersion}'),
+        ListView(
+          padding: const EdgeInsets.all(20),
+          children: [
+            Text(
+              'Analysis Pipeline',
+              style: Theme.of(context).textTheme.headlineMedium,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Run a sample through the trained ML model when the backend is available, then pass the raw output to the verification layer.',
+              style: Theme.of(context).textTheme.bodyLarge,
+            ),
+            const SizedBox(height: 20),
+            SectionCard(
+              title: 'ML inference status',
+              subtitle:
+                  'The Flutter app requests raw AI predictions from the Python backend and then applies verification locally.',
+              child: Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  Chip(label: Text('Mode: ${controller.modelInfo.dataMode}')),
+                  Chip(label: Text('Model: ${controller.modelInfo.modelName}')),
+                  Chip(
+                    label: Text(
+                      'Version: ${controller.modelInfo.modelVersion}',
+                    ),
+                  ),
+                  Chip(
+                    label: Text(
+                      controller.modelInfo.backendReachable
+                          ? 'Backend reachable'
+                          : 'Backend offline',
+                    ),
+                  ),
+                ],
               ),
-              Chip(
-                label: Text(
-                  controller.modelInfo.backendReachable
-                      ? 'Backend reachable'
-                      : 'Backend offline',
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 20),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final pipeline = _PipelineOverview(controller: controller);
-            final selector = _EventSelector(
-              controller: controller,
-              selected: selected,
-            );
-            if (constraints.maxWidth < 960) {
-              return Column(
-                children: [selector, const SizedBox(height: 16), pipeline],
-              );
-            }
-            return Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(flex: 4, child: selector),
-                const SizedBox(width: 16),
-                Expanded(flex: 5, child: pipeline),
-              ],
-            );
-          },
-        ),
-        const SizedBox(height: 20),
-        if (batchSummary != null) _BatchSummaryCard(summary: batchSummary),
-        if (batchSummary != null) const SizedBox(height: 20),
-        if (incident != null)
-          SectionCard(
-            title: 'Latest analysis result',
-            subtitle:
-                'This view explicitly separates raw prediction from verified decision.',
-            trailing: StatusBadge(incident.finalDecision.status),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
+            ),
+            const SizedBox(height: 20),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final pipeline = _PipelineOverview(controller: controller);
+                final selector = _EventSelector(
+                  controller: controller,
+                  selected: selected,
+                );
+                if (constraints.maxWidth < 960) {
+                  return Column(
+                    children: [selector, const SizedBox(height: 16), pipeline],
+                  );
+                }
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Chip(
-                      label: Text(
-                        'Raw AI label: ${incident.analysis.rawAiLabel}',
+                    Expanded(flex: 4, child: selector),
+                    const SizedBox(width: 16),
+                    Expanded(flex: 5, child: pipeline),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 20),
+            if (batchSummary != null) _BatchSummaryCard(summary: batchSummary),
+            if (batchSummary != null) const SizedBox(height: 20),
+            if (incident != null)
+              SectionCard(
+                title: 'Latest analysis result',
+                subtitle:
+                    'This view explicitly separates raw prediction from verified decision.',
+                trailing: StatusBadge(incident.finalDecision.status),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 12,
+                      runSpacing: 12,
+                      children: [
+                        Chip(
+                          label: Text(
+                            'Raw AI label: ${incident.analysis.rawAiLabel}',
+                          ),
+                        ),
+                        Chip(
+                          label: Text(
+                            'Raw confidence: ${formatPercent(incident.analysis.rawConfidence)}',
+                          ),
+                        ),
+                        Chip(
+                          label: Text(
+                            'Stability: ${incident.analysis.stabilityScore.toStringAsFixed(2)}',
+                          ),
+                        ),
+                        Chip(
+                          label: Text(
+                            'Verification: ${incident.verification.verificationScore.toStringAsFixed(2)}',
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      incident.finalDecision.explanation,
+                      style: Theme.of(context).textTheme.bodyLarge,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Triggered indicators',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    ...incident.analysis.triggeredIndicators.map(
+                      (item) => Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          '• $item',
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
                       ),
                     ),
-                    Chip(
-                      label: Text(
-                        'Raw confidence: ${formatPercent(incident.analysis.rawConfidence)}',
-                      ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Verification checks',
+                      style: Theme.of(context).textTheme.titleMedium,
                     ),
-                    Chip(
-                      label: Text(
-                        'Stability: ${incident.analysis.stabilityScore.toStringAsFixed(2)}',
-                      ),
+                    const SizedBox(height: 10),
+                    ...incident.verification.checks.map(
+                      (check) => VerificationCheckTile(check: check),
                     ),
-                    Chip(
-                      label: Text(
-                        'Verification: ${incident.verification.verificationScore.toStringAsFixed(2)}',
-                      ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 12,
+                      runSpacing: 12,
+                      children: [
+                        FilledButton.icon(
+                          onPressed: () {
+                            controller.submitLatestForReview();
+                            final reviewIncident =
+                                controller.latestIncident ?? incident;
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => EventDetailsScreen(
+                                  controller: controller,
+                                  incident: reviewIncident,
+                                ),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.fact_check_outlined),
+                          label: const Text('Send to analyst review'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => EventDetailsScreen(
+                                  controller: controller,
+                                  incident: incident,
+                                ),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.open_in_new),
+                          label: const Text('Open event details'),
+                        ),
+                      ],
                     ),
                   ],
                 ),
-                const SizedBox(height: 16),
-                Text(
-                  incident.finalDecision.explanation,
-                  style: Theme.of(context).textTheme.bodyLarge,
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Triggered indicators',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: 8),
-                ...incident.analysis.triggeredIndicators.map(
-                  (item) => Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(
-                      '• $item',
-                      style: Theme.of(context).textTheme.bodyMedium,
+              ),
+          ],
+        ),
+        if (controller.isAnalyzing)
+          Positioned.fill(
+            child: Container(
+              color: Colors.white.withValues(alpha: 0.72),
+              alignment: Alignment.center,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 360),
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox(
+                          width: 42,
+                          height: 42,
+                          child: CircularProgressIndicator(strokeWidth: 3),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          controller.isImporting
+                              ? 'Processing dataset'
+                              : 'Processing event',
+                          style: Theme.of(context).textTheme.titleMedium,
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          controller.loadingMessage,
+                          style: Theme.of(context).textTheme.bodyMedium,
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(height: 16),
-                Text(
-                  'Verification checks',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: 10),
-                ...incident.verification.checks.map(
-                  (check) => VerificationCheckTile(check: check),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
-                  children: [
-                    FilledButton.icon(
-                      onPressed: () {
-                        controller.submitLatestForReview();
-                        final reviewIncident =
-                            controller.latestIncident ?? incident;
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => EventDetailsScreen(
-                              controller: controller,
-                              incident: reviewIncident,
-                            ),
-                          ),
-                        );
-                      },
-                      icon: const Icon(Icons.fact_check_outlined),
-                      label: const Text('Send to analyst review'),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => EventDetailsScreen(
-                              controller: controller,
-                              incident: incident,
-                            ),
-                          ),
-                        );
-                      },
-                      icon: const Icon(Icons.open_in_new),
-                      label: const Text('Open event details'),
-                    ),
-                  ],
-                ),
-              ],
+              ),
             ),
           ),
       ],
@@ -249,7 +294,7 @@ class _EventSelector extends StatelessWidget {
                 onPressed: controller.isAnalyzing
                     ? null
                     : controller.runAnalysis,
-                icon: controller.isAnalyzing
+                icon: controller.isAnalyzing && !controller.isImporting
                     ? const SizedBox(
                         width: 18,
                         height: 18,
@@ -257,22 +302,36 @@ class _EventSelector extends StatelessWidget {
                       )
                     : const Icon(Icons.play_arrow),
                 label: Text(
-                  controller.isAnalyzing ? 'Analyzing...' : 'Run analysis',
+                  controller.isAnalyzing && !controller.isImporting
+                      ? 'Analyzing...'
+                      : 'Run analysis',
                 ),
               ),
               OutlinedButton.icon(
-                onPressed: () async {
-                  final result = await FilePicker.platform.pickFiles(
-                    type: FileType.custom,
-                    allowedExtensions: const ['csv'],
-                  );
-                  final path = result?.files.single.path;
-                  if (path != null) {
-                    await controller.importFromFile(path);
-                  }
-                },
-                icon: const Icon(Icons.upload_file_outlined),
-                label: const Text('Import CSV'),
+                onPressed: controller.isAnalyzing
+                    ? null
+                    : () async {
+                        final result = await FilePicker.platform.pickFiles(
+                          type: FileType.custom,
+                          allowedExtensions: const ['csv'],
+                        );
+                        final path = result?.files.single.path;
+                        if (path != null) {
+                          await controller.importFromFile(path);
+                        }
+                      },
+                icon: controller.isAnalyzing && controller.isImporting
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.upload_file_outlined),
+                label: Text(
+                  controller.isAnalyzing && controller.isImporting
+                      ? 'Importing CSV...'
+                      : 'Import CSV',
+                ),
               ),
             ],
           ),
@@ -347,45 +406,56 @@ class _PipelineOverview extends StatelessWidget {
       title: 'Verification-first pipeline',
       subtitle:
           'The final status is only assigned after the verification layer validates the raw AI output.',
-      child: GridView.count(
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        crossAxisCount: MediaQuery.of(context).size.width > 1200 ? 4 : 2,
-        crossAxisSpacing: 12,
-        mainAxisSpacing: 12,
-        childAspectRatio: 1.15,
-        children: [
-          PipelineStageCard(
-            title: '1. Input event',
-            description:
-                'Load a sample network event or parse a CSV dataset into ThreatEvent records.',
-            active: phase == AnalysisPhase.idle,
-            completed: phase != AnalysisPhase.idle,
-          ),
-          PipelineStageCard(
-            title: '2. Raw AI prediction',
-            description:
-                'Primary model outputs a raw label and confidence score.',
-            active: phase == AnalysisPhase.rawAiRunning,
-            completed:
-                phase == AnalysisPhase.verificationRunning ||
-                phase == AnalysisPhase.ready,
-          ),
-          PipelineStageCard(
-            title: '3. Verification layer',
-            description:
-                'Confidence, stability, context and rule evidence are checked deterministically.',
-            active: phase == AnalysisPhase.verificationRunning,
-            completed: phase == AnalysisPhase.ready,
-          ),
-          PipelineStageCard(
-            title: '4. Final decision',
-            description:
-                'System issues Benign, Verified Threat or Suspicious with analyst action.',
-            active: phase == AnalysisPhase.ready,
-            completed: phase == AnalysisPhase.ready,
-          ),
-        ],
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final maxWidth = constraints.maxWidth;
+          final columns = maxWidth > 1200 ? 4 : 2;
+          final spacing = 12.0;
+          final cardWidth = columns == 1
+              ? maxWidth
+              : (maxWidth - (spacing * (columns - 1))) / columns;
+
+          final cards = [
+            PipelineStageCard(
+              title: '1. Input event',
+              description:
+                  'Load a sample network event or parse a CSV dataset into ThreatEvent records.',
+              active: phase == AnalysisPhase.idle,
+              completed: phase != AnalysisPhase.idle,
+            ),
+            PipelineStageCard(
+              title: '2. Raw AI prediction',
+              description:
+                  'Primary model outputs a raw label and confidence score.',
+              active: phase == AnalysisPhase.rawAiRunning,
+              completed:
+                  phase == AnalysisPhase.verificationRunning ||
+                  phase == AnalysisPhase.ready,
+            ),
+            PipelineStageCard(
+              title: '3. Verification layer',
+              description:
+                  'Confidence, stability, context and rule evidence are checked deterministically.',
+              active: phase == AnalysisPhase.verificationRunning,
+              completed: phase == AnalysisPhase.ready,
+            ),
+            PipelineStageCard(
+              title: '4. Final decision',
+              description:
+                  'System issues Benign, Verified Threat or Suspicious with analyst action.',
+              active: phase == AnalysisPhase.ready,
+              completed: phase == AnalysisPhase.ready,
+            ),
+          ];
+
+          return Wrap(
+            spacing: spacing,
+            runSpacing: spacing,
+            children: cards
+                .map((card) => SizedBox(width: cardWidth, child: card))
+                .toList(),
+          );
+        },
       ),
     );
   }

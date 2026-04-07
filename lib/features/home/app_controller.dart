@@ -20,6 +20,7 @@ class AppController extends ChangeNotifier {
   int _tabIndex = 0;
   bool _initializing = true;
   bool _isAnalyzing = false;
+  bool _isImporting = false;
   bool _isExporting = false;
   String? _error;
   AnalysisPhase _analysisPhase = AnalysisPhase.idle;
@@ -34,6 +35,7 @@ class AppController extends ChangeNotifier {
   int get tabIndex => _tabIndex;
   bool get initializing => _initializing;
   bool get isAnalyzing => _isAnalyzing;
+  bool get isImporting => _isImporting;
   bool get isExporting => _isExporting;
   String? get error => _error;
   AnalysisPhase get analysisPhase => _analysisPhase;
@@ -44,6 +46,22 @@ class AppController extends ChangeNotifier {
   List<ThreatEvent> get sampleEvents => List.unmodifiable(_sampleEvents);
   MlModelInfo get modelInfo => _modelInfo;
   BatchAnalysisSummary? get lastBatchSummary => _lastBatchSummary;
+
+  String get loadingMessage {
+    if (_isImporting) {
+      return 'Importing CSV dataset and analyzing events. This can take a few seconds.';
+    }
+
+    switch (_analysisPhase) {
+      case AnalysisPhase.rawAiRunning:
+        return 'Running raw AI analysis for the selected event.';
+      case AnalysisPhase.verificationRunning:
+        return 'Applying verification checks and preparing the final decision.';
+      case AnalysisPhase.ready:
+      case AnalysisPhase.idle:
+        return 'Processing event...';
+    }
+  }
 
   void initialize() {
     _sampleEvents = _repository.getSampleEvents();
@@ -78,6 +96,7 @@ class AppController extends ChangeNotifier {
 
     _error = null;
     _isAnalyzing = true;
+    _isImporting = false;
     _analysisPhase = AnalysisPhase.rawAiRunning;
     notifyListeners();
 
@@ -105,6 +124,7 @@ class AppController extends ChangeNotifier {
   Future<void> importFromFile(String path) async {
     _error = null;
     _isAnalyzing = true;
+    _isImporting = true;
     _analysisPhase = AnalysisPhase.rawAiRunning;
     notifyListeners();
 
@@ -127,6 +147,7 @@ class AppController extends ChangeNotifier {
       _analysisPhase = AnalysisPhase.idle;
     } finally {
       _isAnalyzing = false;
+      _isImporting = false;
       notifyListeners();
     }
   }
