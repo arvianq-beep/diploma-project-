@@ -23,6 +23,8 @@ class AppController extends ChangeNotifier {
   bool _isImporting = false;
   bool _isExporting = false;
   String? _error;
+  String _loadingMessage = 'Processing event...';
+  double? _loadingProgress;
   AnalysisPhase _analysisPhase = AnalysisPhase.idle;
   ThreatEvent? _selectedEvent;
   IncidentCase? _latestIncident;
@@ -38,6 +40,8 @@ class AppController extends ChangeNotifier {
   bool get isImporting => _isImporting;
   bool get isExporting => _isExporting;
   String? get error => _error;
+  String get loadingMessage => _loadingMessage;
+  double? get loadingProgress => _loadingProgress;
   AnalysisPhase get analysisPhase => _analysisPhase;
   ThreatEvent? get selectedEvent => _selectedEvent;
   IncidentCase? get latestIncident => _latestIncident;
@@ -46,22 +50,6 @@ class AppController extends ChangeNotifier {
   List<ThreatEvent> get sampleEvents => List.unmodifiable(_sampleEvents);
   MlModelInfo get modelInfo => _modelInfo;
   BatchAnalysisSummary? get lastBatchSummary => _lastBatchSummary;
-
-  String get loadingMessage {
-    if (_isImporting) {
-      return 'Importing CSV dataset and analyzing events. This can take a few seconds.';
-    }
-
-    switch (_analysisPhase) {
-      case AnalysisPhase.rawAiRunning:
-        return 'Running raw AI analysis for the selected event.';
-      case AnalysisPhase.verificationRunning:
-        return 'Applying verification checks and preparing the final decision.';
-      case AnalysisPhase.ready:
-      case AnalysisPhase.idle:
-        return 'Processing event...';
-    }
-  }
 
   void initialize() {
     _sampleEvents = _repository.getSampleEvents();
@@ -98,11 +86,14 @@ class AppController extends ChangeNotifier {
     _isAnalyzing = true;
     _isImporting = false;
     _analysisPhase = AnalysisPhase.rawAiRunning;
+    _loadingProgress = null;
+    _loadingMessage = 'Running raw AI analysis for the selected event.';
     notifyListeners();
 
     try {
       await Future<void>.delayed(const Duration(milliseconds: 500));
       _analysisPhase = AnalysisPhase.verificationRunning;
+      _loadingMessage = 'Applying verification checks and preparing the final decision.';
       notifyListeners();
       await Future<void>.delayed(const Duration(milliseconds: 550));
 
@@ -111,12 +102,15 @@ class AppController extends ChangeNotifier {
       _history.insert(0, incident);
       _reports.insert(0, _repository.buildReport(incident));
       _analysisPhase = AnalysisPhase.ready;
+      _loadingProgress = 1;
+      _loadingMessage = 'Analysis complete.';
       _tabIndex = 1;
     } catch (exception) {
       _error = exception.toString();
       _analysisPhase = AnalysisPhase.idle;
     } finally {
       _isAnalyzing = false;
+      _loadingProgress = null;
       notifyListeners();
     }
   }
@@ -126,10 +120,29 @@ class AppController extends ChangeNotifier {
     _isAnalyzing = true;
     _isImporting = true;
     _analysisPhase = AnalysisPhase.rawAiRunning;
+    _loadingProgress = 0;
+    _loadingMessage = 'Preparing CSV import...';
     notifyListeners();
 
     try {
-      final incidents = await _repository.analyzeCsvFile(path);
+      final incidents = await _repository.analyzeCsvFile(
+        path,
+        onProgress: ({
+          required String phase,
+          required int processed,
+          required int total,
+          required String message,
+        }) {
+          _analysisPhase = phase == 'parsing'
+              ? AnalysisPhase.rawAiRunning
+              : AnalysisPhase.verificationRunning;
+          _loadingMessage = message;
+          _loadingProgress = total > 0
+              ? (processed / total).clamp(0.0, 1.0)
+              : null;
+          notifyListeners();
+        },
+      );
       if (incidents.isEmpty) {
         _error = 'No CSV rows could be parsed into ThreatEvent objects.';
         return;
@@ -141,6 +154,8 @@ class AppController extends ChangeNotifier {
       _reports.insertAll(0, incidents.map(_repository.buildReport));
       _lastBatchSummary = _repository.buildBatchSummary(path, incidents);
       _analysisPhase = AnalysisPhase.ready;
+      _loadingProgress = 1;
+      _loadingMessage = 'Dataset import complete.';
       _tabIndex = 1;
     } catch (exception) {
       _error = exception.toString();
@@ -148,6 +163,7 @@ class AppController extends ChangeNotifier {
     } finally {
       _isAnalyzing = false;
       _isImporting = false;
+      _loadingProgress = null;
       notifyListeners();
     }
   }

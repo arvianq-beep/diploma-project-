@@ -86,6 +86,7 @@ class VerificationService {
   VerificationCheck _confidenceCheck(AnalysisResult analysis) {
     final threshold = analysis.rawAiLabel == 'Benign' ? 0.62 : 0.74;
     final passed = analysis.rawConfidence >= threshold;
+    final delta = analysis.rawConfidence - threshold;
     return VerificationCheck(
       key: 'confidence',
       title: 'Confidence threshold check',
@@ -97,7 +98,12 @@ class VerificationService {
       evidence: [
         'Predicted label: ${analysis.rawAiLabel}',
         'Observed confidence: ${analysis.rawConfidence.toStringAsFixed(2)}',
+        'Score formula: verification score for this check = raw confidence',
         'Required threshold: ${threshold.toStringAsFixed(2)}',
+        'Threshold gap: ${delta >= 0 ? '+' : ''}${delta.toStringAsFixed(2)}',
+        passed
+            ? 'Result: passed because the model confidence is above the required threshold.'
+            : 'Result: failed because the model confidence is below the required threshold.',
       ],
     );
   }
@@ -114,7 +120,12 @@ class VerificationService {
       weight: 0.22,
       evidence: [
         'Stability score: ${analysis.stabilityScore.toStringAsFixed(2)}',
+        'Score formula: backend returns stability after testing small feature perturbations.',
+        'Required threshold: 0.66',
         'Alternative hypothesis: ${analysis.alternativeHypothesis}',
+        passed
+            ? 'Result: passed because the prediction remained stable enough under small changes.'
+            : 'Result: failed because small feature changes make the prediction too unstable.',
       ],
     );
   }
@@ -123,7 +134,8 @@ class VerificationService {
     final score = analysis.rawAiLabel == 'Benign'
         ? (1 - ((event.contextRiskScore + event.anomalyScore) / 2))
         : ((event.contextRiskScore * 0.6) + (event.anomalyScore * 0.4));
-    final passed = score >= (analysis.rawAiLabel == 'Benign' ? 0.60 : 0.58);
+    final threshold = analysis.rawAiLabel == 'Benign' ? 0.60 : 0.58;
+    final passed = score >= threshold;
     return VerificationCheck(
       key: 'context',
       title: 'Anomaly and context cross-check',
@@ -135,7 +147,15 @@ class VerificationService {
       evidence: [
         'Anomaly score: ${event.anomalyScore.toStringAsFixed(2)}',
         'Context risk: ${event.contextRiskScore.toStringAsFixed(2)}',
+        analysis.rawAiLabel == 'Benign'
+            ? 'Score formula: 1 - ((context risk + anomaly score) / 2)'
+            : 'Score formula: (context risk * 0.60) + (anomaly score * 0.40)',
+        'Calculated context score: ${score.toStringAsFixed(2)}',
+        'Required threshold: ${threshold.toStringAsFixed(2)}',
         if (event.offHoursActivity) 'Observed outside normal business window.',
+        passed
+            ? 'Result: passed because the event context supports the raw model verdict.'
+            : 'Result: failed because anomaly/context values do not support the raw model verdict strongly enough.',
       ],
     );
   }
@@ -145,12 +165,27 @@ class VerificationService {
     AnalysisResult analysis,
   ) {
     var score = 0.18;
+    final evidenceParts = <String>['Base score: 0.18'];
     if (event.knownBadSource) score += 0.22;
+    if (event.knownBadSource) evidenceParts.add('+0.22 known bad source');
     if (event.failedLogins >= 6) score += 0.22;
+    if (event.failedLogins >= 6) {
+      evidenceParts.add('+0.22 failed logins >= 6');
+    }
     if (event.bytesTransferredKb >= 10000) score += 0.18;
+    if (event.bytesTransferredKb >= 10000) {
+      evidenceParts.add('+0.18 bytes transferred >= 10000 KB');
+    }
     if (event.repeatedAttempts) score += 0.14;
+    if (event.repeatedAttempts) evidenceParts.add('+0.14 repeated attempts');
     if (analysis.triggeredIndicators.isNotEmpty) score += 0.12;
+    if (analysis.triggeredIndicators.isNotEmpty) {
+      evidenceParts.add('+0.12 triggered indicators present');
+    }
     if (event.tags.contains('diagnostics-window')) score -= 0.18;
+    if (event.tags.contains('diagnostics-window')) {
+      evidenceParts.add('-0.18 diagnostics window');
+    }
 
     final normalizedScore = score.clamp(0.0, 1.0);
     final benignPass =
@@ -169,12 +204,19 @@ class VerificationService {
           : normalizedScore,
       weight: 0.24,
       evidence: [
+        'Score breakdown: ${evidenceParts.join(', ')}',
         'Cross-evidence score: ${normalizedScore.toStringAsFixed(2)}',
+        analysis.rawAiLabel == 'Benign'
+            ? 'Pass rule for benign: normalized score must be <= 0.44'
+            : 'Pass rule for threat: normalized score must be >= 0.58',
         if (event.knownBadSource) 'Threat intelligence match present.',
         if (event.failedLogins >= 6) 'Authentication abuse rule triggered.',
         if (event.repeatedAttempts) 'Repeated-attempt heuristic triggered.',
         if (event.tags.contains('diagnostics-window'))
           'Diagnostic window reduces certainty.',
+        (benignPass || threatPass)
+            ? 'Result: passed because rule-based evidence supports the raw model verdict.'
+            : 'Result: failed because rule-based evidence is not strong enough for the raw model verdict.',
       ],
     );
   }
@@ -189,7 +231,17 @@ class VerificationService {
       passed: score >= 0.80,
       score: score,
       weight: 0.14,
-      evidence: analysis.triggeredIndicators,
+      evidence: [
+        'Indicator count: ${analysis.triggeredIndicators.length}',
+        analysis.triggeredIndicators.isNotEmpty
+            ? 'Score formula: indicators exist, so explainability score = 0.92'
+            : 'Score formula: no indicators, so explainability score = 0.40',
+        'Required threshold: 0.80',
+        ...analysis.triggeredIndicators,
+        score >= 0.80
+            ? 'Result: passed because the model output has interpretable supporting indicators.'
+            : 'Result: failed because the model output lacks enough interpretable support.',
+      ],
     );
   }
 

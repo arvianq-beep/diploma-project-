@@ -32,14 +32,14 @@ class AnalysisScreen extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Run a sample through the trained ML model when the backend is available, then pass the raw output to the verification layer.',
+              'Run a sample through the backend detector, then review the server-side verification result and final decision.',
               style: Theme.of(context).textTheme.bodyLarge,
             ),
             const SizedBox(height: 20),
             SectionCard(
               title: 'ML inference status',
               subtitle:
-                  'The Flutter app requests raw AI predictions from the Python backend and then applies verification locally.',
+                  'The Flutter app requests the full detector + verifier decision from the Python backend.',
               child: Wrap(
                 spacing: 12,
                 runSpacing: 12,
@@ -226,6 +226,33 @@ class AnalysisScreen extends StatelessWidget {
                           style: Theme.of(context).textTheme.bodyMedium,
                           textAlign: TextAlign.center,
                         ),
+                        const SizedBox(height: 16),
+                        SizedBox(
+                          width: double.infinity,
+                          child: controller.loadingProgress != null
+                              ? Column(
+                                  children: [
+                                    LinearProgressIndicator(
+                                      value: controller.loadingProgress,
+                                      minHeight: 8,
+                                      borderRadius: BorderRadius.circular(999),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      '${(controller.loadingProgress! * 100).toStringAsFixed(0)}%',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.bodySmall,
+                                    ),
+                                  ],
+                                )
+                              : const LinearProgressIndicator(
+                                  minHeight: 8,
+                                  borderRadius: BorderRadius.all(
+                                    Radius.circular(999),
+                                  ),
+                                ),
+                        ),
                       ],
                     ),
                   ),
@@ -259,7 +286,7 @@ class _EventSelector extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           DropdownButtonFormField<String>(
-            value: selectedValue,
+            initialValue: selectedValue,
             items: controller.sampleEvents
                 .map(
                   (event) => DropdownMenuItem<String>(
@@ -435,7 +462,7 @@ class _PipelineOverview extends StatelessWidget {
             PipelineStageCard(
               title: '3. Verification layer',
               description:
-                  'Confidence, stability, context and rule evidence are checked deterministically.',
+                  'A backend MLP verifies detector confidence, perturbation stability, context consistency and cross-evidence.',
               active: phase == AnalysisPhase.verificationRunning,
               completed: phase == AnalysisPhase.ready,
             ),

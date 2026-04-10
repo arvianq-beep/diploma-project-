@@ -121,15 +121,21 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
           SectionCard(
             title: 'Verification layer',
             subtitle:
-                'The final status depends on confidence, stability, context and cross-evidence checks.',
+                'The backend verifier combines neural confidence with stability, context and cross-evidence checks.',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
+                  'Model before verification: ${incident.analysis.rawAiLabel} '
+                  '(${formatPercent(incident.analysis.rawConfidence)})',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 16),
+                Text(
                   'Verification score: ${incident.verification.verificationScore.toStringAsFixed(2)}',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 16),
                 Text(incident.verification.summary),
                 const SizedBox(height: 14),
                 ...incident.verification.checks.map(
@@ -142,7 +148,7 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
           SectionCard(
             title: 'Final decision and analyst view',
             subtitle:
-                'This is the defense-ready screen: it ties the verified status to explanation and manual review.',
+                '',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [

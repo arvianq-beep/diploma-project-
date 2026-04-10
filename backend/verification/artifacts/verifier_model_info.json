@@ -1,0 +1,54 @@
+{
+  "model_name": "Secure Decision Verification MLP",
+  "model_version": "verifier-tabular-mlp-v1",
+  "architecture": {
+    "type": "mlp",
+    "hidden_layers": [
+      48,
+      24
+    ],
+    "dropout": 0.12,
+    "activation": "relu"
+  },
+  "threshold": 0.58,
+  "input_features": [
+    "duration_seconds_norm",
+    "bytes_transferred_kb_log",
+    "packets_per_second_log",
+    "failed_logins_norm",
+    "anomaly_score",
+    "context_risk_score",
+    "source_port_norm",
+    "destination_port_norm",
+    "known_bad_source",
+    "off_hours_activity",
+    "repeated_attempts",
+    "protocol_tcp",
+    "protocol_udp",
+    "protocol_icmp",
+    "protocol_other",
+    "detector_is_threat",
+    "detector_confidence",
+    "detector_stability_score",
+    "triggered_indicators_count_norm",
+    "perturbation_mean_confidence",
+    "perturbation_min_confidence",
+    "perturbation_max_confidence",
+    "perturbation_std_confidence",
+    "perturbation_confidence_drop",
+    "perturbation_variance",
+    "label_consistency_ratio",
+    "context_consistency_score",
+    "cross_evidence_score",
+    "support_alignment_score"
+  ],
+  "training_sources": [
+    "bootstrap_synthetic"
+  ],
+  "label_generation": {
+    "description": "Because the repository does not include human-labelled verification targets, the verifier is trained on pseudo-labels: a sample is marked verified only when the Stage 1 detector prediction matches ground truth and is simultaneously stable, confident, and context-supported.",
+    "attack_rule": "verified = detector correct AND confidence >= 0.62 AND stability >= 0.58 AND label_consistency >= 0.74 AND confidence_drop <= 0.18 AND context_score >= 0.48 AND cross_evidence_score >= 0.54 AND support_alignment_score >= 0.56",
+    "benign_rule": "verified = detector correct AND confidence >= 0.56 AND stability >= 0.58 AND label_consistency >= 0.74 AND confidence_drop <= 0.18 AND context_score >= 0.52 AND cross_evidence_score <= 0.46 AND support_alignment_score >= 0.54"
+  },
+  "seed": 42
+}

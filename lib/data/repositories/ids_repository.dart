@@ -2,7 +2,6 @@ import 'package:diploma_application_ml/data/repositories/mock_ids_repository.dar
 import 'package:diploma_application_ml/data/services/csv_event_import_service.dart';
 import 'package:diploma_application_ml/data/services/ids_api_service.dart';
 import 'package:diploma_application_ml/data/services/report_export_service.dart';
-import 'package:diploma_application_ml/data/services/verification_service.dart';
 import 'package:diploma_application_ml/domain/models/analyst_review.dart';
 import 'package:diploma_application_ml/domain/models/batch_analysis_summary.dart';
 import 'package:diploma_application_ml/domain/models/final_decision_status.dart';
@@ -11,25 +10,29 @@ import 'package:diploma_application_ml/domain/models/ml_model_info.dart';
 import 'package:diploma_application_ml/domain/models/report_model.dart';
 import 'package:diploma_application_ml/domain/models/threat_event.dart';
 
+typedef CsvAnalysisProgressCallback =
+    void Function({
+      required String phase,
+      required int processed,
+      required int total,
+      required String message,
+    });
+
 class IdsRepository {
   IdsRepository({
     MockIdsRepository? fallbackRepository,
     IdsApiService? apiService,
     CsvEventImportService? csvImportService,
-    VerificationService? verificationService,
     ReportExportService? reportExportService,
   }) : _fallbackRepository = fallbackRepository ?? MockIdsRepository(),
        _apiService = apiService ?? IdsApiService(),
        _csvImportService = csvImportService ?? CsvEventImportService(),
-       _verificationService =
-           verificationService ?? const VerificationService(),
        _reportExportService =
            reportExportService ?? const ReportExportService();
 
   final MockIdsRepository _fallbackRepository;
   final IdsApiService _apiService;
   final CsvEventImportService _csvImportService;
-  final VerificationService _verificationService;
   final ReportExportService _reportExportService;
 
   List<ThreatEvent> getSampleEvents() => _fallbackRepository.getSampleEvents();
@@ -47,37 +50,73 @@ class IdsRepository {
 
   Future<IncidentCase> analyzeEvent(ThreatEvent event) async {
     try {
-      final analysis = await _apiService.analyzeEvent(event);
-      final verification = _verificationService.verify(
-        event: event,
-        analysis: analysis,
-      );
-
-      return IncidentCase(
-        event: event,
-        analysis: analysis,
-        verification: verification.verification,
-        finalDecision: verification.decision,
-        analystReview: _initialReviewFor(verification.decision.status),
-      );
+      return await _apiService.analyzeEvent(event);
     } catch (_) {
       return _fallbackRepository.analyzeEvent(event);
     }
   }
 
-  Future<List<ThreatEvent>> importThreatEvents(String path) {
-    return _csvImportService.parseFile(path);
+  Future<List<ThreatEvent>> importThreatEvents(
+    String path, {
+    int? limit,
+    CsvAnalysisProgressCallback? onProgress,
+  }) {
+    return _csvImportService.parseFile(
+      path,
+      limit: limit,
+      onProgress: ({
+        required int rowsParsed,
+        required int? totalRowsEstimate,
+        required String message,
+      }) {
+        onProgress?.call(
+          phase: 'parsing',
+          processed: rowsParsed,
+          total: totalRowsEstimate ?? rowsParsed,
+          message: message,
+        );
+      },
+    );
   }
 
   Future<List<IncidentCase>> analyzeCsvFile(
     String path, {
     int limit = 30,
+    CsvAnalysisProgressCallback? onProgress,
   }) async {
-    final events = await importThreatEvents(path);
+    final events = await importThreatEvents(
+      path,
+      limit: limit,
+      onProgress: onProgress,
+    );
     final sliced = events.take(limit).toList();
     final incidents = <IncidentCase>[];
+    if (sliced.isEmpty) {
+      onProgress?.call(
+        phase: 'parsing',
+        processed: 0,
+        total: 0,
+        message: 'No events found in CSV file.',
+      );
+      return incidents;
+    }
+
+    onProgress?.call(
+      phase: 'analyzing',
+      processed: 0,
+      total: sliced.length,
+      message: 'Starting backend analysis for ${sliced.length} events...',
+    );
+
     for (final event in sliced) {
       incidents.add(await analyzeEvent(event));
+      onProgress?.call(
+        phase: 'analyzing',
+        processed: incidents.length,
+        total: sliced.length,
+        message: 'Analyzing events: ${incidents.length} / ${sliced.length}',
+      );
+      await Future<void>.delayed(Duration.zero);
     }
     return incidents;
   }
@@ -129,19 +168,6 @@ class IdsRepository {
       analystName: analystName,
       notes: notes,
       state: state,
-    );
-  }
-
-  AnalystReview _initialReviewFor(FinalDecisionStatus status) {
-    return AnalystReview(
-      state: status == FinalDecisionStatus.suspicious
-          ? AnalystReviewState.pending
-          : AnalystReviewState.reviewed,
-      analystName: 'SOC Analyst',
-      notes: status == FinalDecisionStatus.suspicious
-          ? 'Awaiting analyst validation of conflicting evidence.'
-          : 'Automated workflow completed with model-backed verification.',
-      updatedAt: DateTime.now(),
     );
   }
 }

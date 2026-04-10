@@ -3,28 +3,74 @@ import 'dart:io';
 
 import 'package:diploma_application_ml/domain/models/threat_event.dart';
 
+typedef CsvParseProgressCallback =
+    void Function({
+      required int rowsParsed,
+      required int? totalRowsEstimate,
+      required String message,
+    });
+
 class CsvEventImportService {
-  Future<List<ThreatEvent>> parseFile(String path) async {
+  Future<List<ThreatEvent>> parseFile(
+    String path, {
+    int? limit,
+    CsvParseProgressCallback? onProgress,
+  }) async {
     final file = File(path);
-    final content = await file.readAsString();
-    final rows = const LineSplitter()
-        .convert(content)
-        .where((line) => line.trim().isNotEmpty)
-        .toList();
-    if (rows.isEmpty) {
+    if (!await file.exists()) {
       return [];
     }
 
-    final headers = _parseCsvLine(rows.first);
+    onProgress?.call(
+      rowsParsed: 0,
+      totalRowsEstimate: null,
+      message: 'Parsing CSV file...',
+    );
+
+    List<String>? headers;
     final events = <ThreatEvent>[];
-    for (var index = 1; index < rows.length; index++) {
-      final values = _parseCsvLine(rows[index]);
+    var rowIndex = 0;
+
+    await for (final line in file
+        .openRead()
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())) {
+      if (line.trim().isEmpty) {
+        continue;
+      }
+
+      if (headers == null) {
+        headers = _parseCsvLine(line);
+        continue;
+      }
+
+      rowIndex++;
+      final values = _parseCsvLine(line);
       final row = <String, String>{};
       for (var i = 0; i < headers.length; i++) {
         row[headers[i]] = i < values.length ? values[i] : '';
       }
-      events.add(_eventFromRow(index, row, file.uri.pathSegments.last));
+      events.add(_eventFromRow(rowIndex, row, file.uri.pathSegments.last));
+
+      if (rowIndex == 1 || rowIndex % 10 == 0) {
+        onProgress?.call(
+          rowsParsed: rowIndex,
+          totalRowsEstimate: null,
+          message: 'Parsing CSV rows: $rowIndex',
+        );
+      }
+
+      if (limit != null && events.length >= limit) {
+        break;
+      }
     }
+
+    onProgress?.call(
+      rowsParsed: events.length,
+      totalRowsEstimate: events.length,
+      message: 'CSV parsing complete. ${events.length} events ready for analysis.',
+    );
+
     return events;
   }
 

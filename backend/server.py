@@ -14,6 +14,7 @@ from flask_cors import CORS
 from datasets_storage import list_datasets, save_uploaded_dataset
 from ml.inference import MLPredictor
 from storage import get_conn, init_db, insert_report
+from verification.inference import SecureDecisionVerificationService
 
 
 app = Flask(__name__)
@@ -22,6 +23,7 @@ CORS(app)
 init_db()
 
 predictor: MLPredictor | None = None
+verifier: SecureDecisionVerificationService | None = None
 
 
 def get_predictor() -> MLPredictor:
@@ -29,6 +31,14 @@ def get_predictor() -> MLPredictor:
     if predictor is None:
         predictor = MLPredictor()
     return predictor
+
+
+def get_verifier() -> SecureDecisionVerificationService:
+    global verifier
+    predictor_instance = get_predictor()
+    if verifier is None:
+        verifier = SecureDecisionVerificationService(predictor_instance)
+    return verifier
 
 
 def _json_payload():
@@ -66,34 +76,67 @@ def _normalize_event(event_payload: dict, fallback_id: str | None = None) -> dic
 
 def _analysis_response(event_payload: dict) -> dict:
     predictor_instance = get_predictor()
+    verifier_instance = get_verifier()
     normalized_event = _normalize_event(event_payload)
-    output = predictor_instance.predict_from_event(normalized_event)
+    detector_output = predictor_instance.predict_from_event(normalized_event)
+    verification = verifier_instance.evaluate(normalized_event, detector_output)
 
     response = {
         "event_id": normalized_event["id"],
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "event": normalized_event,
+        "threat_type": verification.threat_type,
+        "is_threat": verification.is_threat,
+        "ai_confidence": verification.ai_confidence,
+        "detector_label": verification.detector_label,
+        "detector_details": verification.detector_details,
+        "verification_confidence": verification.verification_confidence,
+        "is_verified": verification.is_verified,
+        "verification_details": verification.verification_details,
+        "final_decision_status": verification.final_decision_status,
+        "recommended_action": verification.recommended_action,
+        "model_available": verification.model_available,
+        "detector_model_version": verification.detector_model_version,
+        "verifier_model_version": verification.verifier_model_version,
+        "feature_snapshot": verification.feature_snapshot,
         "prediction": {
-            "label": output.label,
-            "confidence": output.confidence,
-            "stability_score": output.stability_score,
-            "model_version": output.model_version,
-            "reasoning": output.reasoning,
-            "alternative_hypothesis": output.alternative_hypothesis,
-            "triggered_indicators": output.triggered_indicators,
-            "feature_snapshot": output.feature_snapshot,
+            "label": detector_output.label,
+            "confidence": detector_output.confidence,
+            "stability_score": detector_output.stability_score,
+            "model_version": detector_output.model_version,
+            "reasoning": detector_output.reasoning,
+            "alternative_hypothesis": detector_output.alternative_hypothesis,
+            "triggered_indicators": detector_output.triggered_indicators,
+            "feature_snapshot": detector_output.feature_snapshot,
             "model_available": predictor_instance.available,
         },
     }
 
     insert_report(
-        label=output.label,
-        confidence=output.confidence,
-        decision_status="Raw AI prediction",
-        decision_reason=output.reasoning,
+        event_id=normalized_event["id"],
+        label=detector_output.label,
+        confidence=detector_output.confidence,
+        decision_status=verification.final_decision_status,
+        decision_reason=verification.verification_details.get("summary"),
+        final_status=verification.final_decision_status,
+        recommended_action=verification.recommended_action,
+        detector_output=response["prediction"],
+        verification_output={
+            "verification_confidence": verification.verification_confidence,
+            "is_verified": verification.is_verified,
+            "verification_details": verification.verification_details,
+            "verifier_model_version": verification.verifier_model_version,
+        },
+        final_decision={
+            "status": verification.final_decision_status,
+            "recommended_action": verification.recommended_action,
+            "threat_type": verification.threat_type,
+        },
+        event_snapshot=normalized_event,
         traffic_context={
             "event": normalized_event,
             "prediction": response["prediction"],
+            "verification": response["verification_details"],
         },
         raw_input=event_payload,
     )
@@ -206,6 +249,7 @@ def root():
             "endpoints": [
                 "/health",
                 "/api/v1/ml/metadata",
+                "/api/v1/ml/verifier/metadata",
                 "/api/v1/analyze",
                 "/api/v1/analyze/csv",
                 "/api/v1/datasets",
@@ -221,11 +265,14 @@ def root():
 @app.get("/health")
 def health():
     predictor_instance = get_predictor()
+    verifier_instance = get_verifier()
     return jsonify(
         {
             "status": "ok",
             "model_available": predictor_instance.available,
             "model_version": predictor_instance.model_version,
+            "verifier_available": verifier_instance.available,
+            "verifier_model_version": verifier_instance.model_version,
         }
     )
 
@@ -233,16 +280,36 @@ def health():
 @app.get("/api/v1/ml/metadata")
 def ml_metadata():
     predictor_instance = get_predictor()
+    verifier_instance = get_verifier()
     return jsonify(
         {
             "model_available": predictor_instance.available,
             "model_version": predictor_instance.model_version,
             "model_info": predictor_instance.model_info,
             "metrics": predictor_instance.metrics,
+            "verifier": {
+                "model_available": verifier_instance.available,
+                "model_version": verifier_instance.model_version,
+                "model_info": verifier_instance.metadata,
+                "metrics": verifier_instance.metrics,
+            },
             "datasets": [
                 "CIC-IDS2017",
                 "CIC-UNSW-NB15 (Augmented)",
             ],
+        }
+    )
+
+
+@app.get("/api/v1/ml/verifier/metadata")
+def verifier_metadata():
+    verifier_instance = get_verifier()
+    return jsonify(
+        {
+            "model_available": verifier_instance.available,
+            "model_version": verifier_instance.model_version,
+            "model_info": verifier_instance.metadata,
+            "metrics": verifier_instance.metrics,
         }
     )
 
@@ -351,10 +418,10 @@ def reports_list():
         f"""
         SELECT
           COUNT(*) as total,
-          COALESCE(SUM(CASE WHEN label = 'Benign' THEN 1 ELSE 0 END), 0) as normal,
-          COALESCE(SUM(CASE WHEN label != 'Benign' THEN 1 ELSE 0 END), 0) as non_normal,
-          0 as verified_threat,
-          0 as suspicious
+          COALESCE(SUM(CASE WHEN COALESCE(final_status, decision_status, label) = 'Benign' THEN 1 ELSE 0 END), 0) as benign,
+          COALESCE(SUM(CASE WHEN COALESCE(final_status, decision_status, label) = 'Verified Threat' THEN 1 ELSE 0 END), 0) as verified_threat,
+          COALESCE(SUM(CASE WHEN COALESCE(final_status, decision_status, label) = 'Suspicious' THEN 1 ELSE 0 END), 0) as suspicious,
+          COALESCE(SUM(CASE WHEN COALESCE(final_status, decision_status, label) != 'Benign' THEN 1 ELSE 0 END), 0) as non_normal
         FROM reports {where_sql}
         """,
         params,
@@ -374,7 +441,14 @@ def reports_list():
     items = []
     for row in rows:
         item = dict(row)
-        for key in ("traffic_context", "raw_input"):
+        for key in (
+            "traffic_context",
+            "raw_input",
+            "detector_output",
+            "verification_output",
+            "final_decision",
+            "event_snapshot",
+        ):
             if item.get(key):
                 try:
                     item[key] = json.loads(item[key])
@@ -441,4 +515,5 @@ def export_reports():
 if __name__ == "__main__":
     if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or __name__ == "__main__":
         predictor = MLPredictor()
+        verifier = SecureDecisionVerificationService(predictor)
     app.run(host="0.0.0.0", port=5001, debug=True, use_reloader=True)
