@@ -21,7 +21,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .preprocessing import DatasetBundle, load_dataset_bundle
-from .schema import CANONICAL_FEATURES, METRICS_PATH, MODEL_INFO_PATH, MODEL_PATH
+from .schema import CANONICAL_FEATURES, FEATURES_PATH, METRICS_PATH, MODEL_INFO_PATH, MODEL_PATH
 
 
 def build_pipeline() -> Pipeline:
@@ -134,6 +134,10 @@ def train(cic_path: str, unsw_path: str | None = None) -> dict:
         results["cross_dataset"] = evaluate_bundle(pipeline, unsw_bundle)
 
     dump(pipeline, MODEL_PATH)
+
+    # Keep rf_ids_features.json in sync with FEATURE_SCHEMA so that
+    # _check_json_consistency() passes on the next import.
+    FEATURES_PATH.write_text(json.dumps(list(CANONICAL_FEATURES), indent=2), encoding="utf-8")
 
     METRICS_PATH.write_text(json.dumps(results, indent=2), encoding="utf-8")
     MODEL_INFO_PATH.write_text(

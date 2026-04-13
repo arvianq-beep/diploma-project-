@@ -12,7 +12,18 @@ METRICS_PATH = ARTIFACTS_DIR / "evaluation_metrics.json"
 MODEL_INFO_PATH = ARTIFACTS_DIR / "model_info.json"
 FEATURES_PATH = ARTIFACTS_DIR / "rf_ids_features.json"
 
-DEFAULT_CANONICAL_FEATURES = [
+# ---------------------------------------------------------------------------
+# FEATURE_SCHEMA — single source of truth for the 77 canonical flow features.
+#
+# Rules:
+#   • Never add, remove, or reorder entries without retraining the model.
+#   • Any rf_ids_features.json on disk is validated against this tuple at
+#     import time; a mismatch raises ValueError so train/inference skew is
+#     caught immediately rather than silently producing wrong predictions.
+#   • Training writes rf_ids_features.json from this tuple (not the other
+#     way around), so the JSON is a derived artifact, not a source of truth.
+# ---------------------------------------------------------------------------
+FEATURE_SCHEMA: tuple[str, ...] = (
     "ack_flag_count",
     "act_data_pkt_fwd",
     "active_max",
@@ -90,23 +101,40 @@ DEFAULT_CANONICAL_FEATURES = [
     "total_length_bwd_packets",
     "total_length_fwd_packets",
     "urg_flag_count",
-]
+)
+
+assert len(FEATURE_SCHEMA) == 77, f"FEATURE_SCHEMA must have 77 features, got {len(FEATURE_SCHEMA)}"
+assert len(FEATURE_SCHEMA) == len(set(FEATURE_SCHEMA)), "FEATURE_SCHEMA contains duplicate feature names"
 
 
-def load_canonical_features() -> list[str]:
-    """Load the exact model feature order from JSON source of truth."""
+def _check_json_consistency() -> None:
+    """Raise ValueError if rf_ids_features.json exists but diverges from FEATURE_SCHEMA.
 
-    if FEATURES_PATH.exists():
-        try:
-            payload = json.loads(FEATURES_PATH.read_text(encoding="utf-8"))
-            if isinstance(payload, list) and all(isinstance(item, str) for item in payload):
-                return payload
-        except Exception:
-            pass
-    return list(DEFAULT_CANONICAL_FEATURES)
+    No silent fallback: a stale JSON file means the training artifact is out of
+    sync with the inference code. The app must not start in that state.
+    """
+    if not FEATURES_PATH.exists():
+        return
+    try:
+        payload = json.loads(FEATURES_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"Cannot parse {FEATURES_PATH.name}: {exc}") from exc
+    if not (isinstance(payload, list) and all(isinstance(x, str) for x in payload)):
+        raise ValueError(f"{FEATURES_PATH.name} must be a JSON array of strings.")
+    if list(payload) != list(FEATURE_SCHEMA):
+        extra = sorted(set(payload) - set(FEATURE_SCHEMA))
+        missing = sorted(set(FEATURE_SCHEMA) - set(payload))
+        raise ValueError(
+            f"{FEATURES_PATH.name} diverges from FEATURE_SCHEMA "
+            f"(extra={extra or '—'}, missing={missing or '—'}). "
+            "Delete the stale JSON and retrain, or update FEATURE_SCHEMA to match the artifact."
+        )
 
 
-CANONICAL_FEATURES = load_canonical_features()
+_check_json_consistency()
+
+# Mutable list alias kept for backward compatibility; prefer FEATURE_SCHEMA (tuple) in new code.
+CANONICAL_FEATURES: list[str] = list(FEATURE_SCHEMA)
 
 
 def _aliases(*names: str) -> list[str]:

@@ -61,6 +61,15 @@ LEGACY_TO_CANONICAL = {
     "backward_bytes": "total_length_bwd_packets",
 }
 
+# Multiplier recipes used by _stability_score (per-row) and _stability_scores_batch.
+# Kept as a module-level constant so both paths stay in sync automatically.
+STABILITY_VARIANT_RECIPES: tuple[dict[str, float], ...] = (
+    {"flow_bytes_per_s": 0.95, "flow_packets_per_s": 0.95, "total_fwd_packets": 0.96, "total_bwd_packets": 0.96},
+    {"flow_bytes_per_s": 1.05, "flow_packets_per_s": 1.05, "total_fwd_packets": 1.04, "total_bwd_packets": 1.04},
+    {"flow_duration": 0.94, "flow_packets_per_s": 1.02},
+    {"flow_duration": 1.06, "flow_bytes_per_s": 0.98},
+)
+
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -152,21 +161,92 @@ class MLPredictor:
         normalized = {name: max(float(features[name]), 0.0) for name in self.feature_order}
         return self._run_prediction(normalized, context=context or {})
 
+    def predict_from_features_batch(
+        self,
+        snapshots: list[dict[str, Any]],
+        contexts: list[dict[str, Any]],
+    ) -> list[PredictionOutput]:
+        """Batch canonical inference: 2 predict_proba calls for N rows instead of N × 6.
+
+        Call 1 — main attack probabilities for all N rows (one DataFrame).
+        Call 2 — stability perturbations for all N rows (one 5 × N stacked DataFrame).
+
+        Both snapshots and contexts must be parallel lists of length N.
+        Each snapshot must satisfy all 77 FEATURE_SCHEMA constraints (same as
+        predict_from_features); a FeatureValidationError is raised on the first failure.
+        """
+        if not snapshots:
+            return []
+
+        # Validate and build (N, 77) DataFrame in one pass.
+        rows: list[list[float]] = []
+        normalized_list: list[dict[str, float]] = []
+        for snap in snapshots:
+            validate_canonical_features(snap, self.feature_order)
+            normalized = {name: max(float(snap[name]), 0.0) for name in self.feature_order}
+            rows.append([normalized[name] for name in self.feature_order])
+            normalized_list.append(normalized)
+        df = pd.DataFrame(rows, columns=self.feature_order)
+
+        main_probs = self._raw_probs_batch(df)          # call 1: shape (N,)
+        stability = self._stability_scores_batch(df)    # call 2: shape (N,)
+
+        outputs: list[PredictionOutput] = []
+        for normalized, ctx, prob, stab in zip(normalized_list, contexts, main_probs, stability):
+            label = "Network Attack" if prob >= 0.5 else "Benign"
+            confidence = float(prob) if label != "Benign" else float(1.0 - prob)
+            indicators = self._build_indicators(normalized, ctx)
+            outputs.append(PredictionOutput(
+                label=label,
+                confidence=confidence,
+                stability_score=float(stab),
+                model_version=self.model_version,
+                reasoning=self._build_reasoning(label, normalized, indicators),
+                alternative_hypothesis=self._alternative_hypothesis(label, normalized),
+                triggered_indicators=indicators,
+                feature_snapshot=dict(normalized),
+            ))
+        return outputs
+
     def _frame_from_features(self, normalized: dict[str, float]) -> pd.DataFrame:
         ordered_row = [[normalized[feature_name] for feature_name in self.feature_order]]
-        return pd.DataFrame(ordered_row, columns=self.feature_order)
+        frame = pd.DataFrame(ordered_row, columns=self.feature_order)
+        # Hard pre-predict guards — these must never fire if normalization is correct.
+        if list(frame.columns) != self.feature_order:
+            raise FeatureValidationError(
+                "DataFrame column order diverged from training order after normalization."
+            )
+        nan_cols = [c for c in frame.columns if frame[c].isnull().any()]
+        if nan_cols:
+            raise FeatureValidationError(f"NaN values in predict DataFrame: {nan_cols}")
+        inf_cols = [c for c in frame.columns if np.isinf(frame[c].values).any()]
+        if inf_cols:
+            raise FeatureValidationError(f"Inf values in predict DataFrame: {inf_cols}")
+        return frame
 
     def _validate_feature_order(self) -> None:
         if self.pipeline is None:
             return
+        # sklearn sets feature_names_in_ on the Pipeline when fitted on a named DataFrame.
+        # Fall back to the first step's attribute for older sklearn builds.
         model_features = getattr(self.pipeline, "feature_names_in_", None)
         if model_features is None:
-            return
+            try:
+                model_features = self.pipeline.steps[0][1].feature_names_in_
+            except (AttributeError, IndexError):
+                model_features = None
+        if model_features is None:
+            raise ValueError(
+                "Loaded model artifact does not expose feature_names_in_. "
+                "The artifact predates named-input enforcement. "
+                "Retrain with the current training pipeline to enforce strict feature-order validation."
+            )
         model_order = [str(feature_name) for feature_name in model_features]
         if model_order != self.feature_order:
             raise ValueError(
-                "rf_ids_features.json does not match the model feature order. "
-                "Update rf_ids_features.json or replace the model artifact."
+                f"Model artifact feature order does not match FEATURE_SCHEMA. "
+                f"First divergence at index {next(i for i,(a,b) in enumerate(zip(model_order, self.feature_order)) if a != b) if model_order != self.feature_order else len(model_order)}. "
+                "Delete the stale artifact and retrain."
             )
 
     def _normalize_features(self, features: dict[str, Any]) -> dict[str, float]:
@@ -369,6 +449,15 @@ class MLPredictor:
         )
         return compatibility
 
+    def _normalize_legacy(self, event: dict[str, Any]) -> dict[str, float]:
+        """Normalize a legacy/simplified event into the 77-feature canonical schema.
+
+        This is the only entry point for non-canonical payloads.  Feature synthesis
+        is intentional and explicit; do NOT call this when all 77 canonical features
+        are already available — use predict_from_features() instead.
+        """
+        return self._normalize_features(event)
+
     def _heuristic_probability(self, features: dict[str, Any], context: dict[str, Any]) -> float:
         score = 0.10
         if features["destination_port"] in {22, 23, 3389}:
@@ -405,36 +494,65 @@ class MLPredictor:
             score += 0.04
         return _clamp(score, 0.05, 0.98)
 
+    def _raw_probs_batch(self, df: pd.DataFrame) -> np.ndarray:
+        """Single predict_proba call for N rows; returns attack-class probs shape (N,).
+
+        For the heuristic path (no trained model) the inference is vectorised over
+        the DataFrame columns so that no Python-level row loop is needed.
+        """
+        if self.pipeline is not None:
+            return self.pipeline.predict_proba(df)[:, 1]
+        # Vectorised heuristic — mirrors _heuristic_probability but operates on columns.
+        score = np.full(len(df), 0.10)
+        score += np.where(df["destination_port"].isin({22, 23, 3389}), 0.14, 0.0)
+        score += np.where(df["flow_packets_per_s"] > 650, 0.18, 0.0)
+        score += np.where(df["flow_bytes_per_s"] > 250000, 0.14, 0.0)
+        score += np.where(df["syn_flag_count"] > 0, 0.12, 0.0)
+        score += np.where(df["rst_flag_count"] > 0, 0.10, 0.0)
+        score += np.where(df["ack_flag_count"] > 18, 0.06, 0.0)
+        score += np.where(df["down_up_ratio"] > 1.8, 0.06, 0.0)
+        return np.clip(score, 0.01, 0.99)
+
+    def _stability_scores_batch(self, df: pd.DataFrame) -> np.ndarray:
+        """Batch stability scoring: one predict_proba call for all N × 5 rows.
+
+        Stacks baseline (N rows) and 4 STABILITY_VARIANT_RECIPES (N rows each) into a
+        single (5N, 77) DataFrame, runs one predict_proba, reshapes to (N, 5), and
+        returns clip(1 − std(axis=1) × 4.5, 0.05, 0.99) — identical math to the
+        per-row _stability_score path.
+        """
+        N = len(df)
+        if self.pipeline is None:
+            # Vectorised heuristic stability (probability proxy = 0.5 → score = 0.44 + bonuses).
+            score = np.full(N, 0.44)
+            score += np.where(df["flow_packets_per_s"].to_numpy() > 650, 0.06, 0.0)
+            score += np.where(df["flow_bytes_per_s"].to_numpy() > 250000, 0.05, 0.0)
+            score += np.where(df["syn_flag_count"].to_numpy() > 0, 0.04, 0.0)
+            return np.clip(score, 0.05, 0.98)
+
+        frames: list[pd.DataFrame] = [df]
+        for recipe in STABILITY_VARIANT_RECIPES:
+            variant = df.copy()
+            for col, mul in recipe.items():
+                variant[col] = (variant[col] * mul).clip(lower=0.0)
+            frames.append(variant)
+
+        stacked = pd.concat(frames, ignore_index=True)           # (N × 5, 77)
+        all_probs = self.pipeline.predict_proba(stacked)[:, 1]   # (N × 5,)
+        probs_matrix = all_probs.reshape(len(frames), N).T        # (N, 5)
+        spread = probs_matrix.std(axis=1)                         # (N,)
+        return np.clip(1.0 - spread * 4.5, 0.05, 0.99)
+
     def _stability_score(self, features: dict[str, Any]) -> float:
+        """Per-row stability score (used by single-event predict_from_features path)."""
         if self.pipeline is None:
             return self._heuristic_stability(features, 0.5)
 
         baseline = self._predict_attack_probability(features)
         variants = []
-        for multipliers in (
-            {
-                "flow_bytes_per_s": 0.95,
-                "flow_packets_per_s": 0.95,
-                "total_fwd_packets": 0.96,
-                "total_bwd_packets": 0.96,
-            },
-            {
-                "flow_bytes_per_s": 1.05,
-                "flow_packets_per_s": 1.05,
-                "total_fwd_packets": 1.04,
-                "total_bwd_packets": 1.04,
-            },
-            {
-                "flow_duration": 0.94,
-                "flow_packets_per_s": 1.02,
-            },
-            {
-                "flow_duration": 1.06,
-                "flow_bytes_per_s": 0.98,
-            },
-        ):
+        for recipe in STABILITY_VARIANT_RECIPES:
             variant = dict(features)
-            for feature_name, multiplier in multipliers.items():
+            for feature_name, multiplier in recipe.items():
                 variant[feature_name] = max(_safe_float(variant.get(feature_name)) * multiplier, 0.0)
             variants.append(self._predict_attack_probability(variant))
 
@@ -446,6 +564,35 @@ class MLPredictor:
             return self._heuristic_probability(normalized, {})
         frame = self._frame_from_features(normalized)
         return float(self.pipeline.predict_proba(frame)[0][1])
+
+    def _run_prediction(self, normalized: dict[str, float], context: dict[str, Any]) -> PredictionOutput:
+        """Core prediction pipeline shared by canonical and legacy code paths.
+
+        normalized  — dict with exactly the 77 FEATURE_SCHEMA keys, all finite floats
+        context     — original event dict used only for indicator / reasoning text
+        """
+        if self.pipeline is not None:
+            probability = self._predict_attack_probability(normalized)
+        else:
+            probability = self._heuristic_probability(normalized, context)
+
+        label = "Network Attack" if probability >= 0.5 else "Benign"
+        confidence = float(probability) if label != "Benign" else float(1.0 - probability)
+        stability = self._stability_score(normalized)
+        indicators = self._build_indicators(normalized, context)
+        reasoning = self._build_reasoning(label, normalized, indicators)
+        alternative = self._alternative_hypothesis(label, normalized)
+
+        return PredictionOutput(
+            label=label,
+            confidence=confidence,
+            stability_score=stability,
+            model_version=self.model_version,
+            reasoning=reasoning,
+            alternative_hypothesis=alternative,
+            triggered_indicators=indicators,
+            feature_snapshot=dict(normalized),
+        )
 
     def _build_indicators(self, features: dict[str, Any], context: dict[str, Any]) -> list[str]:
         indicators: list[str] = []

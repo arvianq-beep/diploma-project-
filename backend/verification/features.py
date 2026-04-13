@@ -4,10 +4,23 @@ import math
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from ml.inference import MLPredictor, PredictionOutput
 
 from .schema import PerturbationSummary, VERIFIER_FEATURE_NAMES, VerificationFeatureBundle
+
+# Perturbation recipes used by generate_perturbation_variants (per-row) and
+# run_perturbation_analysis_batch.  Keeping them here ensures both paths are
+# always identical.
+PERTURBATION_RECIPES: tuple[tuple[str, dict[str, float]], ...] = (
+    ("lower-rate",           {"flow_packets_per_s": 0.94, "flow_bytes_per_s": 0.95}),
+    ("higher-rate",          {"flow_packets_per_s": 1.06, "flow_bytes_per_s": 1.05}),
+    ("shorter-duration",     {"flow_duration": 0.92, "total_fwd_packets": 0.95, "total_bwd_packets": 0.95}),
+    ("longer-duration",      {"flow_duration": 1.08, "total_fwd_packets": 1.04, "total_bwd_packets": 1.04}),
+    ("byte-balance-shift",   {"total_length_fwd_packets": 1.08, "total_length_bwd_packets": 0.93}),
+    ("packet-balance-shift", {"total_fwd_packets": 1.07, "total_bwd_packets": 0.94}),
+)
 
 
 def detector_attack_probability(label: str, confidence: float) -> float:
@@ -137,19 +150,20 @@ def cross_evidence_score(event: dict[str, Any], detector_output: PredictionOutpu
     failed_logins = int(_safe_float(event.get("failed_logins")))
     indicators_count = len(detector_output.triggered_indicators)
 
-    # Prefer canonical flow fields; fall back to legacy event fields so that
-    # both direct 77-feature payloads and legacy simplified payloads produce
-    # a meaningful score.
-    packets_per_second = _safe_float(event.get("flow_packets_per_s")) or _safe_float(
-        event.get("packets_per_second")
-    )
-    fwd_bytes = _safe_float(event.get("total_length_fwd_packets"))
-    bwd_bytes = _safe_float(event.get("total_length_bwd_packets"))
-    bytes_kb = (
-        (fwd_bytes + bwd_bytes) / 1024.0
-        if (fwd_bytes + bwd_bytes) > 0
-        else _safe_float(event.get("bytes_transferred_kb"))
-    )
+    # Use canonical flow metrics from the detector snapshot.
+    # feature_snapshot is always populated with all 77 FEATURE_SCHEMA keys by
+    # _run_prediction before verification runs — if it is empty, that means the
+    # caller skipped inference, which is a programming error.
+    snapshot = detector_output.feature_snapshot
+    if not snapshot:
+        raise ValueError(
+            "detector_output.feature_snapshot is empty. "
+            "predict_from_features() or predict_from_event() must run before verification."
+        )
+    packets_per_second = _safe_float(snapshot.get("flow_packets_per_s"))
+    fwd_bytes = _safe_float(snapshot.get("total_length_fwd_packets"))
+    bwd_bytes = _safe_float(snapshot.get("total_length_bwd_packets"))
+    bytes_kb = (fwd_bytes + bwd_bytes) / 1024.0
 
     if bool(event.get("known_bad_source")):
         score += 0.22
@@ -225,25 +239,100 @@ def run_perturbation_analysis(
 
 
 def generate_perturbation_variants(detector_snapshot: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    """Generate small numeric perturbations for stability analysis."""
-
+    """Generate small numeric perturbations for per-row stability analysis."""
     variants: list[tuple[str, dict[str, Any]]] = []
-    recipes = [
-        ("lower-rate", {"flow_packets_per_s": 0.94, "flow_bytes_per_s": 0.95}),
-        ("higher-rate", {"flow_packets_per_s": 1.06, "flow_bytes_per_s": 1.05}),
-        ("shorter-duration", {"flow_duration": 0.92, "total_fwd_packets": 0.95, "total_bwd_packets": 0.95}),
-        ("longer-duration", {"flow_duration": 1.08, "total_fwd_packets": 1.04, "total_bwd_packets": 1.04}),
-        ("byte-balance-shift", {"total_length_fwd_packets": 1.08, "total_length_bwd_packets": 0.93}),
-        ("packet-balance-shift", {"total_fwd_packets": 1.07, "total_bwd_packets": 0.94}),
-    ]
-
-    for name, multipliers in recipes:
+    for name, multipliers in PERTURBATION_RECIPES:
         variant = dict(detector_snapshot)
         for field, multiplier in multipliers.items():
             variant[field] = max(_safe_float(variant.get(field)) * multiplier, 0.0)
         variants.append((name, variant))
-
     return variants
+
+
+def run_perturbation_analysis_batch(
+    predictor: MLPredictor,
+    snapshots: list[dict[str, Any]],
+    baseline_outputs: list[PredictionOutput],
+) -> list[PerturbationSummary]:
+    """Batch perturbation analysis: one predict_proba call for all N × 6 variants.
+
+    Replaces N sequential calls to run_perturbation_analysis(), each of which called
+    predict_from_features() 6 times (6 × 6 = 36 predict_proba calls per row due to
+    inner stability scoring).  This function issues a single call over the entire
+    (N × 6, 77) stacked DataFrame.
+
+    All statistics are identical to the per-row implementation:
+      • confidence values use max(p, 1−p)  (how certain the model is, regardless of direction)
+      • probability values use raw attack probability p  (for variance)
+      • label consistency counts variants whose label matches the baseline
+    """
+    N = len(snapshots)
+    if N == 0:
+        return []
+
+    n_variants = len(PERTURBATION_RECIPES)
+    feature_order = predictor.feature_order
+
+    # Build (N × n_variants, 77) DataFrame — outer loop = recipe, inner = row
+    # so that reshape(n_variants, N).T gives (N, n_variants) correctly.
+    variant_frames: list[pd.DataFrame] = []
+    for _, recipe in PERTURBATION_RECIPES:
+        rows: list[list[float]] = []
+        for snap in snapshots:
+            variant = dict(snap)
+            for col, mul in recipe.items():
+                variant[col] = max(_safe_float(variant.get(col)) * mul, 0.0)
+            rows.append([_safe_float(variant.get(f, 0.0)) for f in feature_order])
+        variant_frames.append(pd.DataFrame(rows, columns=feature_order))
+
+    stacked = pd.concat(variant_frames, ignore_index=True)   # (N × n_variants, 77)
+
+    if predictor.pipeline is not None:
+        raw_variant_probs = predictor.pipeline.predict_proba(stacked)[:, 1]
+    else:
+        raw_variant_probs = predictor._raw_probs_batch(stacked)
+
+    # reshape: (n_variants, N).T → (N, n_variants)
+    variant_probs = raw_variant_probs.reshape(n_variants, N).T  # (N, n_variants)
+
+    # ── vectorised aggregation ────────────────────────────────────────────────
+    baseline_confs = np.array([o.confidence for o in baseline_outputs], dtype=np.float64)
+    baseline_attack = np.array(
+        [detector_attack_probability(o.label, o.confidence) for o in baseline_outputs],
+        dtype=np.float64,
+    )
+
+    # confidence = max(p, 1−p) for each variant
+    variant_confs = np.where(variant_probs >= 0.5, variant_probs, 1.0 - variant_probs)  # (N, n_variants)
+
+    all_confs = np.hstack([baseline_confs[:, None], variant_confs])    # (N, n_variants+1)
+    all_probs = np.hstack([baseline_attack[:, None], variant_probs])   # (N, n_variants+1)
+
+    mean_confs = all_confs.mean(axis=1)
+    min_confs  = all_confs.min(axis=1)
+    max_confs  = all_confs.max(axis=1)
+    std_confs  = all_confs.std(axis=1)
+    conf_drops = np.maximum(baseline_confs - min_confs, 0.0)
+    variances  = all_probs.var(axis=1)
+
+    baseline_is_attack = (baseline_attack >= 0.5)[:, None]              # (N, 1) bool
+    variant_is_attack  = variant_probs >= 0.5                            # (N, n_variants) bool
+    all_is_attack = np.hstack([baseline_is_attack, variant_is_attack])  # (N, n_variants+1)
+    consistency = (all_is_attack == baseline_is_attack).mean(axis=1)    # (N,)
+
+    return [
+        PerturbationSummary(
+            mean_confidence=float(mean_confs[i]),
+            min_confidence=float(min_confs[i]),
+            max_confidence=float(max_confs[i]),
+            std_confidence=float(std_confs[i]),
+            confidence_drop=float(conf_drops[i]),
+            variance=float(variances[i]),
+            label_consistency_ratio=float(consistency[i]),
+            samples=[],  # Not populated in batch mode (training does not need per-sample detail)
+        )
+        for i in range(N)
+    ]
 
 
 def synthesize_event_from_snapshot(

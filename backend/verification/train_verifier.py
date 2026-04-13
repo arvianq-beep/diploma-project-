@@ -16,7 +16,15 @@ from torch.utils.data import DataLoader, TensorDataset
 from ml.inference import MLPredictor
 from ml.preprocessing import DatasetBundle, harmonize_frame, load_dataset_bundle
 
-from .features import build_verification_features, synthesize_event_from_snapshot
+from .features import (
+    context_consistency_score,
+    cross_evidence_score,
+    detector_feature_map,
+    event_feature_map,
+    perturbation_feature_map,
+    run_perturbation_analysis_batch,
+    synthesize_event_from_snapshot,
+)
 from .model import VerifierMLP, save_artifacts
 from .schema import VERIFIER_FEATURE_NAMES
 
@@ -97,14 +105,18 @@ def rows_from_bundle(
 ) -> list[TrainingRow]:
     """Generate verifier training rows from detector outputs and real ground-truth labels.
 
+    Batch implementation — predict_proba is called exactly 3 times regardless of N:
+      • Call 1: main attack probabilities for all N rows (predict_from_features_batch)
+      • Call 2: stability perturbations for all N rows (stacked 5×N DataFrame)
+      • Call 3: perturbation variants for all N×6 rows (run_perturbation_analysis_batch)
+
     When max_samples is set, a stratified sample is drawn so that the attack/benign
-    ratio is preserved. This keeps per-row RF inference time tractable on large datasets.
+    ratio is preserved before any RF inference runs.
     """
     frame = bundle.frame
     labels = bundle.labels
 
     if max_samples is not None and len(frame) > max_samples:
-        # Stratified sample: preserve attack/benign ratio from the real dataset.
         attack_idx = labels[labels == 1].index
         benign_idx = labels[labels == 0].index
         attack_quota = min(len(attack_idx), max(1, int(max_samples * len(attack_idx) / len(labels))))
@@ -117,44 +129,72 @@ def rows_from_bundle(
         frame = frame.loc[selected]
         labels = labels.loc[selected]
 
-    rows: list[TrainingRow] = []
-    for index, (row_index, snapshot) in enumerate(frame.iterrows()):
-        canonical = snapshot.to_dict()
-        event = synthesize_event_from_snapshot(
-            canonical,
-            event_id=f"{bundle.dataset_name}-{row_index}",
-            title=f"{bundle.dataset_name} sample {index}",
+    original_indices = list(frame.index)
+
+    # ── phase 1: build all events (no RF calls) ───────────────────────────────
+    # to_dict(orient='records') is ~10× faster than iterrows() for bulk conversion.
+    snapshots: list[dict[str, Any]] = frame.to_dict(orient="records")
+    events: list[dict[str, Any]] = [
+        synthesize_event_from_snapshot(
+            snap,
+            event_id=f"{bundle.dataset_name}-{row_idx}",
+            title=f"{bundle.dataset_name} sample {i}",
             source=bundle.dataset_name,
         )
-        detector_output = predictor.predict_from_features(canonical, context=event)
-        features = build_verification_features(
-            predictor=predictor,
-            event=event,
-            detector_output=detector_output,
-        )
+        for i, (snap, row_idx) in enumerate(zip(snapshots, original_indices))
+    ]
+
+    # ── phase 2: batch Stage-1 inference (2 predict_proba calls) ─────────────
+    detector_outputs = predictor.predict_from_features_batch(snapshots, events)
+
+    # ── phase 3: batch perturbation analysis (1 predict_proba call) ──────────
+    perturbations = run_perturbation_analysis_batch(predictor, snapshots, detector_outputs)
+
+    # ── phase 4: assemble verifier vectors and pseudo-labels (no RF calls) ───
+    rows: list[TrainingRow] = []
+    for i, (event, det_out, perturb) in enumerate(zip(events, detector_outputs, perturbations)):
+        context_score = context_consistency_score(event=event, detector_output=det_out)
+        evidence_score = cross_evidence_score(event=event, detector_output=det_out)
+
+        benign_alignment = (
+            (1.0 - float(event.get("anomaly_score", 0.0)))
+            + (1.0 - float(event.get("context_risk_score", 0.0)))
+            + (1.0 - evidence_score)
+        ) / 3.0
+        threat_alignment = (context_score + evidence_score + det_out.confidence) / 3.0
+        support_score = float(max(0.0, min(1.0, benign_alignment if det_out.label == "Benign" else threat_alignment)))
+
+        feature_map = {
+            **event_feature_map(event),
+            **detector_feature_map(det_out),
+            **perturbation_feature_map(perturb),
+            "context_consistency_score": round(context_score, 6),
+            "cross_evidence_score": round(evidence_score, 6),
+            "support_alignment_score": round(support_score, 6),
+        }
+        vector = [float(feature_map[name]) for name in VERIFIER_FEATURE_NAMES]
+
         target, reason = generate_verification_target(
-            detector_label=detector_output.label,
-            detector_confidence=detector_output.confidence,
-            detector_stability=detector_output.stability_score,
-            perturbation_label_consistency=features.perturbation.label_consistency_ratio,
-            confidence_drop=features.perturbation.confidence_drop,
-            context_score=features.context_consistency_score,
-            cross_evidence_score=features.cross_evidence_score,
-            support_alignment_score=features.support_alignment_score,
-            ground_truth=int(labels.iloc[index]),
+            detector_label=det_out.label,
+            detector_confidence=det_out.confidence,
+            detector_stability=det_out.stability_score,
+            perturbation_label_consistency=perturb.label_consistency_ratio,
+            confidence_drop=perturb.confidence_drop,
+            context_score=context_score,
+            cross_evidence_score=evidence_score,
+            support_alignment_score=support_score,
+            ground_truth=int(labels.iloc[i]),
         )
-        rows.append(
-            TrainingRow(
-                features=features.vector,
-                label=target,
-                reason=reason,
-                metadata={
-                    "ground_truth": int(bundle.labels.iloc[index]),
-                    "detector_label": detector_output.label,
-                    "detector_confidence": round(detector_output.confidence, 4),
-                },
-            )
-        )
+        rows.append(TrainingRow(
+            features=vector,
+            label=target,
+            reason=reason,
+            metadata={
+                "ground_truth": int(bundle.labels.iloc[i]),
+                "detector_label": det_out.label,
+                "detector_confidence": round(det_out.confidence, 4),
+            },
+        ))
     return rows
 
 

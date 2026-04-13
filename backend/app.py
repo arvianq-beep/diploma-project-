@@ -1,12 +1,32 @@
+import json
 import os
+import threading
+import time
 import uuid
+
 import pandas as pd
-from flask import Flask, request, jsonify
+from flask import Flask, Response, request, jsonify, stream_with_context
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 CORS(app)
+
+# ---------------------------------------------------------------------------
+# Real-time monitor — a single global instance shared across requests.
+# Created lazily on the first POST /api/realtime/start.
+# ---------------------------------------------------------------------------
+_monitor_lock = threading.Lock()
+_monitor = None  # type: ignore[assignment]
+
+
+def _get_monitor():
+    return _monitor
+
+
+def _set_monitor(m):
+    global _monitor
+    _monitor = m
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
