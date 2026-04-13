@@ -134,10 +134,22 @@ def cross_evidence_score(event: dict[str, Any], detector_output: PredictionOutpu
 
     score = 0.10
     destination_port = int(_safe_float(event.get("destination_port")))
-    packets_per_second = _safe_float(event.get("packets_per_second"))
-    bytes_kb = _safe_float(event.get("bytes_transferred_kb"))
     failed_logins = int(_safe_float(event.get("failed_logins")))
     indicators_count = len(detector_output.triggered_indicators)
+
+    # Prefer canonical flow fields; fall back to legacy event fields so that
+    # both direct 77-feature payloads and legacy simplified payloads produce
+    # a meaningful score.
+    packets_per_second = _safe_float(event.get("flow_packets_per_s")) or _safe_float(
+        event.get("packets_per_second")
+    )
+    fwd_bytes = _safe_float(event.get("total_length_fwd_packets"))
+    bwd_bytes = _safe_float(event.get("total_length_bwd_packets"))
+    bytes_kb = (
+        (fwd_bytes + bwd_bytes) / 1024.0
+        if (fwd_bytes + bwd_bytes) > 0
+        else _safe_float(event.get("bytes_transferred_kb"))
+    )
 
     if bool(event.get("known_bad_source")):
         score += 0.22
@@ -217,12 +229,12 @@ def generate_perturbation_variants(detector_snapshot: dict[str, Any]) -> list[tu
 
     variants: list[tuple[str, dict[str, Any]]] = []
     recipes = [
-        ("lower-rate", {"packets_per_second": 0.94, "bytes_per_second": 0.95}),
-        ("higher-rate", {"packets_per_second": 1.06, "bytes_per_second": 1.05}),
-        ("shorter-duration", {"duration": 0.92, "forward_packets": 0.95, "backward_packets": 0.95}),
-        ("longer-duration", {"duration": 1.08, "forward_packets": 1.04, "backward_packets": 1.04}),
-        ("byte-balance-shift", {"forward_bytes": 1.08, "backward_bytes": 0.93}),
-        ("packet-balance-shift", {"forward_packets": 1.07, "backward_packets": 0.94}),
+        ("lower-rate", {"flow_packets_per_s": 0.94, "flow_bytes_per_s": 0.95}),
+        ("higher-rate", {"flow_packets_per_s": 1.06, "flow_bytes_per_s": 1.05}),
+        ("shorter-duration", {"flow_duration": 0.92, "total_fwd_packets": 0.95, "total_bwd_packets": 0.95}),
+        ("longer-duration", {"flow_duration": 1.08, "total_fwd_packets": 1.04, "total_bwd_packets": 1.04}),
+        ("byte-balance-shift", {"total_length_fwd_packets": 1.08, "total_length_bwd_packets": 0.93}),
+        ("packet-balance-shift", {"total_fwd_packets": 1.07, "total_bwd_packets": 0.94}),
     ]
 
     for name, multipliers in recipes:
@@ -243,23 +255,21 @@ def synthesize_event_from_snapshot(
 ) -> dict[str, Any]:
     """Build an event-like payload from canonical detector features for verifier training."""
 
-    duration = max(_safe_float(snapshot.get("duration")), 0.1)
-    forward_packets = max(_safe_float(snapshot.get("forward_packets")), 0.0)
-    backward_packets = max(_safe_float(snapshot.get("backward_packets")), 0.0)
-    forward_bytes = max(_safe_float(snapshot.get("forward_bytes")), 0.0)
-    backward_bytes = max(_safe_float(snapshot.get("backward_bytes")), 0.0)
-    packets_per_second = max(_safe_float(snapshot.get("packets_per_second")), 0.0)
-    bytes_per_second = max(_safe_float(snapshot.get("bytes_per_second")), 0.0)
+    duration = max(_safe_float(snapshot.get("flow_duration")), 0.1)
+    forward_packets = max(_safe_float(snapshot.get("total_fwd_packets")), 0.0)
+    backward_packets = max(_safe_float(snapshot.get("total_bwd_packets")), 0.0)
+    forward_bytes = max(_safe_float(snapshot.get("total_length_fwd_packets")), 0.0)
+    backward_bytes = max(_safe_float(snapshot.get("total_length_bwd_packets")), 0.0)
+    packets_per_second = max(_safe_float(snapshot.get("flow_packets_per_s")), 0.0)
+    bytes_per_second = max(_safe_float(snapshot.get("flow_bytes_per_s")), 0.0)
     total_bytes_kb = (forward_bytes + backward_bytes) / 1024.0
     destination_port = int(_safe_float(snapshot.get("destination_port")))
-    protocol = str(snapshot.get("protocol", "UNKNOWN")).upper()
 
     anomaly_score = _clamp01(
         0.18
         + min(math.log1p(packets_per_second) / 14.0, 0.28)
         + min(math.log1p(bytes_per_second) / 15.0, 0.22)
         + (0.12 if destination_port in {22, 23, 3389} else 0.0)
-        + (0.06 if protocol == "ICMP" else 0.0)
     )
     context_risk_score = _clamp01(
         0.14
@@ -277,9 +287,9 @@ def synthesize_event_from_snapshot(
         "description": "Verifier training sample generated from harmonized network-flow features.",
         "source_ip": "10.0.0.10",
         "destination_ip": "192.168.1.20",
-        "source_port": int(_safe_float(snapshot.get("source_port"))),
+        "source_port": 0,
         "destination_port": destination_port,
-        "protocol": protocol,
+        "protocol": "UNKNOWN",
         "bytes_transferred_kb": round(total_bytes_kb, 4),
         "duration_seconds": round(duration, 6),
         "packets_per_second": round(packets_per_second, 4),
@@ -287,7 +297,7 @@ def synthesize_event_from_snapshot(
         "anomaly_score": round(anomaly_score, 4),
         "context_risk_score": round(context_risk_score, 4),
         "known_bad_source": known_bad_source,
-        "off_hours_activity": bytes_per_second > 260000 or protocol == "ICMP",
+        "off_hours_activity": bytes_per_second > 260000,
         "repeated_attempts": repeated_attempts,
         "sample_source": source,
         "captured_at": "2026-01-01T00:00:00+00:00",

@@ -13,6 +13,7 @@ from flask_cors import CORS
 
 from datasets_storage import list_datasets, save_uploaded_dataset
 from ml.inference import MLPredictor
+from ml.schema import CANONICAL_FEATURES, CIC_COLUMN_ALIASES
 from storage import get_conn, init_db, insert_report
 from verification.inference import SecureDecisionVerificationService
 
@@ -45,33 +46,96 @@ def _json_payload():
     return request.get_json(silent=True) or {}
 
 
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n", ""}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
 def _normalize_event(event_payload: dict, fallback_id: str | None = None) -> dict:
     event_id = str(event_payload.get("id") or fallback_id or uuid.uuid4())
     captured_raw = event_payload.get("captured_at") or event_payload.get("timestamp")
     captured_at = captured_raw or datetime.now(timezone.utc).isoformat()
+    direct_features = {
+        feature_name: max(_safe_float(event_payload.get(feature_name)), 0.0)
+        for feature_name in CANONICAL_FEATURES
+        if feature_name in event_payload
+    }
+    derived_duration = max(
+        _safe_float(event_payload.get("duration_seconds")),
+        _safe_float(event_payload.get("duration")),
+        _safe_float(event_payload.get("flow_duration")),
+        0.0,
+    )
+    derived_packets_per_second = max(
+        _safe_float(event_payload.get("packets_per_second")),
+        _safe_float(event_payload.get("flow_packets_per_s")),
+        0.0,
+    )
+    derived_bytes_per_second = max(
+        _safe_float(event_payload.get("bytes_per_second")),
+        _safe_float(event_payload.get("flow_bytes_per_s")),
+        0.0,
+    )
+    derived_bytes_kb = max(
+        _safe_float(event_payload.get("bytes_transferred_kb")),
+        (
+            _safe_float(event_payload.get("total_length_fwd_packets"))
+            + _safe_float(event_payload.get("total_length_bwd_packets"))
+        )
+        / 1024.0,
+    )
+    if derived_bytes_kb == 0.0 and derived_duration > 0 and derived_bytes_per_second > 0:
+        derived_bytes_kb = (derived_bytes_per_second * derived_duration) / 1024.0
 
-    return {
+    normalized_event = {
         "id": event_id,
         "title": str(event_payload.get("title", f"Imported event {event_id}")),
         "description": str(event_payload.get("description", "Network event submitted for ML analysis.")),
         "source_ip": str(event_payload.get("source_ip", "0.0.0.0")),
         "destination_ip": str(event_payload.get("destination_ip", "0.0.0.0")),
-        "source_port": int(float(event_payload.get("source_port", 0) or 0)),
-        "destination_port": int(float(event_payload.get("destination_port", 0) or 0)),
+        "source_port": _safe_int(event_payload.get("source_port", 0)),
+        "destination_port": _safe_int(
+            event_payload.get("destination_port", direct_features.get("destination_port", 0))
+        ),
         "protocol": str(event_payload.get("protocol", "UNKNOWN")),
-        "bytes_transferred_kb": float(event_payload.get("bytes_transferred_kb", 0.0) or 0.0),
-        "duration_seconds": float(event_payload.get("duration_seconds", 0.0) or 0.0),
-        "packets_per_second": float(event_payload.get("packets_per_second", 0.0) or 0.0),
-        "failed_logins": int(float(event_payload.get("failed_logins", 0) or 0)),
-        "anomaly_score": float(event_payload.get("anomaly_score", 0.0) or 0.0),
-        "context_risk_score": float(event_payload.get("context_risk_score", 0.0) or 0.0),
-        "known_bad_source": bool(event_payload.get("known_bad_source", False)),
-        "off_hours_activity": bool(event_payload.get("off_hours_activity", False)),
-        "repeated_attempts": bool(event_payload.get("repeated_attempts", False)),
+        "bytes_transferred_kb": derived_bytes_kb,
+        "duration_seconds": derived_duration,
+        "packets_per_second": derived_packets_per_second,
+        "failed_logins": _safe_int(event_payload.get("failed_logins", 0)),
+        "anomaly_score": _safe_float(event_payload.get("anomaly_score", 0.0)),
+        "context_risk_score": _safe_float(event_payload.get("context_risk_score", 0.0)),
+        "known_bad_source": _safe_bool(event_payload.get("known_bad_source", False)),
+        "off_hours_activity": _safe_bool(event_payload.get("off_hours_activity", False)),
+        "repeated_attempts": _safe_bool(event_payload.get("repeated_attempts", False)),
         "sample_source": str(event_payload.get("sample_source", "Backend API")),
         "captured_at": captured_at,
         "tags": event_payload.get("tags", []),
     }
+    normalized_event.update(direct_features)
+    return normalized_event
 
 
 def _analysis_response(event_payload: dict) -> dict:
@@ -216,7 +280,20 @@ def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> d
     destination_port = read_int("destination_port", "dsport", "Destination Port", "Dst Port", default=0)
     label = read("Label", "label", "attack_cat", default="")
 
-    return {
+    # Resolve canonical features directly from CSV columns using CIC_COLUMN_ALIASES.
+    # Any feature resolved here will be picked up as a direct_feature in _normalize_event,
+    # bypassing the lossy legacy compatibility approximation for that field.
+    canonical_features: dict[str, float] = {}
+    for canonical_name, aliases in CIC_COLUMN_ALIASES.items():
+        for alias in aliases:
+            if alias in row and str(row[alias]).strip() != "":
+                try:
+                    canonical_features[canonical_name] = max(float(row[alias]), 0.0)
+                except (TypeError, ValueError):
+                    pass
+                break
+
+    event: dict = {
         "id": f"csv-{row_index}",
         "title": f"CSV Event {row_index}",
         "description": f"Imported from {filename}" if not label else f"Imported from {filename} with dataset label {label}",
@@ -238,6 +315,9 @@ def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> d
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "tags": ["csv-import", *([f"dataset-label:{label}"] if label else [])],
     }
+    # Canonical features are written last so they are never overwritten by the legacy fields above.
+    event.update(canonical_features)
+    return event
 
 
 @app.get("/")

@@ -89,11 +89,36 @@ def build_bootstrap_dataset(sample_count: int, seed: int) -> DatasetBundle:
     )
 
 
-def rows_from_bundle(bundle: DatasetBundle, predictor: MLPredictor) -> list[TrainingRow]:
-    """Generate verifier training rows from detector outputs and heuristic targets."""
+def rows_from_bundle(
+    bundle: DatasetBundle,
+    predictor: MLPredictor,
+    max_samples: int | None = None,
+    seed: int = 42,
+) -> list[TrainingRow]:
+    """Generate verifier training rows from detector outputs and real ground-truth labels.
+
+    When max_samples is set, a stratified sample is drawn so that the attack/benign
+    ratio is preserved. This keeps per-row RF inference time tractable on large datasets.
+    """
+    frame = bundle.frame
+    labels = bundle.labels
+
+    if max_samples is not None and len(frame) > max_samples:
+        # Stratified sample: preserve attack/benign ratio from the real dataset.
+        attack_idx = labels[labels == 1].index
+        benign_idx = labels[labels == 0].index
+        attack_quota = min(len(attack_idx), max(1, int(max_samples * len(attack_idx) / len(labels))))
+        benign_quota = max_samples - attack_quota
+        rng = np.random.default_rng(seed)
+        sampled_attack = rng.choice(attack_idx, size=min(attack_quota, len(attack_idx)), replace=False)
+        sampled_benign = rng.choice(benign_idx, size=min(benign_quota, len(benign_idx)), replace=False)
+        selected = np.concatenate([sampled_attack, sampled_benign])
+        rng.shuffle(selected)
+        frame = frame.loc[selected]
+        labels = labels.loc[selected]
 
     rows: list[TrainingRow] = []
-    for index, (row_index, snapshot) in enumerate(bundle.frame.iterrows()):
+    for index, (row_index, snapshot) in enumerate(frame.iterrows()):
         canonical = snapshot.to_dict()
         event = synthesize_event_from_snapshot(
             canonical,
@@ -116,7 +141,7 @@ def rows_from_bundle(bundle: DatasetBundle, predictor: MLPredictor) -> list[Trai
             context_score=features.context_consistency_score,
             cross_evidence_score=features.cross_evidence_score,
             support_alignment_score=features.support_alignment_score,
-            ground_truth=int(bundle.labels.iloc[index]),
+            ground_truth=int(labels.iloc[index]),
         )
         rows.append(
             TrainingRow(
@@ -195,6 +220,7 @@ def train_verifier(
     cic_path: str | None,
     unsw_path: str | None,
     bootstrap_samples: int,
+    max_samples_per_dataset: int | None,
     seed: int,
     epochs: int,
     batch_size: int,
@@ -221,7 +247,9 @@ def train_verifier(
 
     training_rows: list[TrainingRow] = []
     for bundle in bundles:
-        training_rows.extend(rows_from_bundle(bundle, predictor))
+        training_rows.extend(
+            rows_from_bundle(bundle, predictor, max_samples=max_samples_per_dataset, seed=seed)
+        )
 
     features, labels = split_arrays(training_rows)
     x_train, x_temp, y_train, y_temp = train_test_split(
@@ -355,6 +383,13 @@ def main() -> None:
     parser.add_argument("--cic", help="Path to CIC-IDS2017 CSV file or directory")
     parser.add_argument("--unsw", help="Path to CIC-UNSW-NB15 CSV file or directory")
     parser.add_argument("--bootstrap-samples", type=int, default=2400)
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Stratified sample cap per dataset before per-row RF inference (e.g. 30000). "
+             "Required when datasets are large; preserves attack/benign ratio.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=26)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -370,6 +405,7 @@ def main() -> None:
         cic_path=args.cic,
         unsw_path=args.unsw,
         bootstrap_samples=args.bootstrap_samples,
+        max_samples_per_dataset=args.max_samples,
         seed=args.seed,
         epochs=args.epochs,
         batch_size=args.batch_size,

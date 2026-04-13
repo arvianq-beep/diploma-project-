@@ -100,38 +100,37 @@ def harmonize_frame(frame: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
         else:
             output[feature] = _coerce_numeric(column)
 
-    if dataset_name == "cic_ids2017":
-        # CIC flow duration is typically stored in microseconds.
-        output["duration"] = output["duration"] / 1_000_000.0
+    if dataset_name in {"cic_ids2017", "unsw_nb15_augmented"}:
+        # Both CIC-IDS2017 and UNSW-NB15 store flow duration in microseconds.
+        output["flow_duration"] = output["flow_duration"] / 1_000_000.0
 
-    output["duration"] = output["duration"].fillna(0.0).clip(lower=0.0)
-    output["source_port"] = output["source_port"].fillna(0).clip(lower=0, upper=65535)
+    output["flow_duration"] = output["flow_duration"].fillna(0.0).clip(lower=0.0)
     output["destination_port"] = output["destination_port"].fillna(0).clip(lower=0, upper=65535)
 
     for feature in (
-        "forward_packets",
-        "backward_packets",
-        "forward_bytes",
-        "backward_bytes",
-        "bytes_per_second",
-        "packets_per_second",
+        "total_fwd_packets",
+        "total_bwd_packets",
+        "total_length_fwd_packets",
+        "total_length_bwd_packets",
+        "flow_bytes_per_s",
+        "flow_packets_per_s",
     ):
         output[feature] = output[feature].fillna(0.0).clip(lower=0.0)
 
-    calculated_bytes_rate = (output["forward_bytes"] + output["backward_bytes"]) / output[
-        "duration"
-    ].replace(0, np.nan)
-    calculated_packets_rate = (output["forward_packets"] + output["backward_packets"]) / output[
-        "duration"
-    ].replace(0, np.nan)
+    # Fill missing rate fields from packet/byte totals when possible.
+    calculated_bytes_rate = (
+        output["total_length_fwd_packets"] + output["total_length_bwd_packets"]
+    ) / output["flow_duration"].replace(0, np.nan)
+    calculated_packets_rate = (
+        output["total_fwd_packets"] + output["total_bwd_packets"]
+    ) / output["flow_duration"].replace(0, np.nan)
 
-    output["bytes_per_second"] = output["bytes_per_second"].replace(0, np.nan).fillna(
-        calculated_bytes_rate
-    ).fillna(0.0)
-    output["packets_per_second"] = output["packets_per_second"].replace(0, np.nan).fillna(
-        calculated_packets_rate
-    ).fillna(0.0)
-    output["protocol"] = output["protocol"].fillna("UNKNOWN")
+    output["flow_bytes_per_s"] = (
+        output["flow_bytes_per_s"].replace(0, np.nan).fillna(calculated_bytes_rate).fillna(0.0)
+    )
+    output["flow_packets_per_s"] = (
+        output["flow_packets_per_s"].replace(0, np.nan).fillna(calculated_packets_rate).fillna(0.0)
+    )
 
     return output[CANONICAL_FEATURES]
 

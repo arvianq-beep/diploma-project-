@@ -16,6 +16,7 @@ TEMP_DIR = tempfile.TemporaryDirectory()
 os.environ["REPORTS_DB_PATH"] = str(Path(TEMP_DIR.name) / "test_reports.db")
 
 import server  # noqa: E402
+from ml.schema import CANONICAL_FEATURES  # noqa: E402
 
 
 class VerificationFlowTest(unittest.TestCase):
@@ -81,6 +82,28 @@ class VerificationFlowTest(unittest.TestCase):
         self.assertEqual(row["final_status"], payload["final_decision_status"])
         self.assertIsNotNone(row["detector_output"])
         self.assertIsNotNone(row["verification_output"])
+
+    def test_analyze_accepts_direct_77_feature_payload(self) -> None:
+        feature_payload = {
+            feature_name: float(index + 1) for index, feature_name in enumerate(CANONICAL_FEATURES)
+        }
+        feature_payload["destination_port"] = 443.0
+
+        response = self.client.post(
+            "/api/v1/analyze",
+            data=json.dumps(feature_payload),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        assert payload is not None
+        self.assertIn("prediction", payload)
+        self.assertIn("feature_snapshot", payload)
+        self.assertEqual(
+            payload["prediction"]["feature_snapshot"]["destination_port"],
+            443.0,
+        )
 
 
 if __name__ == "__main__":

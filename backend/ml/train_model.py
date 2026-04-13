@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 import pandas as pd
 from joblib import dump
-from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
@@ -20,65 +18,34 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import StandardScaler
 
 from .preprocessing import DatasetBundle, load_dataset_bundle
 from .schema import CANONICAL_FEATURES, METRICS_PATH, MODEL_INFO_PATH, MODEL_PATH
 
 
-NUMERIC_FEATURES = [
-    "source_port",
-    "destination_port",
-    "duration",
-    "forward_packets",
-    "backward_packets",
-    "forward_bytes",
-    "backward_bytes",
-    "bytes_per_second",
-    "packets_per_second",
-]
-CAT_FEATURES = ["protocol"]
-
-
 def build_pipeline() -> Pipeline:
-    preprocessor = ColumnTransformer(
-        transformers=[
-            (
-                "numeric",
-                Pipeline(
-                    steps=[
-                        ("imputer", SimpleImputer(strategy="median")),
-                        ("scaler", StandardScaler()),
-                    ]
-                ),
-                NUMERIC_FEATURES,
-            ),
-            (
-                "categorical",
-                Pipeline(
-                    steps=[
-                        ("imputer", SimpleImputer(strategy="most_frequent")),
-                        ("encoder", OneHotEncoder(handle_unknown="ignore")),
-                    ]
-                ),
-                CAT_FEATURES,
-            ),
-        ]
-    )
+    """Build a sklearn Pipeline for the 77-feature canonical flow schema.
 
-    model = RandomForestClassifier(
-        n_estimators=320,
-        max_depth=18,
-        min_samples_leaf=2,
-        class_weight="balanced_subsample",
-        random_state=42,
-        n_jobs=-1,
-    )
-
+    All 77 canonical features are numeric after harmonize_frame(), so a
+    ColumnTransformer is not needed — imputation and scaling are applied
+    to the full feature matrix directly.
+    """
     return Pipeline(
         steps=[
-            ("preprocessor", preprocessor),
-            ("model", model),
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            (
+                "model",
+                RandomForestClassifier(
+                    n_estimators=320,
+                    max_depth=18,
+                    min_samples_leaf=2,
+                    class_weight="balanced_subsample",
+                    random_state=42,
+                    n_jobs=-1,
+                ),
+            ),
         ]
     )
 
@@ -106,7 +73,7 @@ def metrics_from_predictions(y_true, y_pred, y_score) -> dict:
 
 
 def evaluate_bundle(pipeline: Pipeline, bundle: DatasetBundle) -> dict:
-    probabilities = pipeline.predict_proba(bundle.frame)[:, 1]
+    probabilities = pipeline.predict_proba(bundle.frame[CANONICAL_FEATURES])[:, 1]
     predictions = (probabilities >= 0.5).astype(int)
     metrics = metrics_from_predictions(bundle.labels, predictions, probabilities)
     metrics["dataset"] = bundle.dataset_name
@@ -118,19 +85,14 @@ def evaluate_bundle(pipeline: Pipeline, bundle: DatasetBundle) -> dict:
 def train(cic_path: str, unsw_path: str | None = None) -> dict:
     cic_bundle = load_dataset_bundle(cic_path, "cic_ids2017")
 
+    X = cic_bundle.frame[CANONICAL_FEATURES]
+    y = cic_bundle.labels
+
     X_train, X_test, y_train, y_test = train_test_split(
-        cic_bundle.frame,
-        cic_bundle.labels,
-        test_size=0.2,
-        random_state=42,
-        stratify=cic_bundle.labels,
+        X, y, test_size=0.2, random_state=42, stratify=y
     )
     X_train, X_val, y_train, y_val = train_test_split(
-        X_train,
-        y_train,
-        test_size=0.2,
-        random_state=42,
-        stratify=y_train,
+        X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
     )
 
     pipeline = build_pipeline()
@@ -144,10 +106,10 @@ def train(cic_path: str, unsw_path: str | None = None) -> dict:
     results = {
         "model": {
             "model_name": "Random Forest",
-            "model_version": "rf-cic-unsw-v1",
-            "features": CANONICAL_FEATURES,
-            "train_dataset": "CIC-IDS2017",
-            "cross_dataset_evaluation": "CIC-UNSW-NB15 (Augmented)" if unsw_path else None,
+            "model_version": "rf-flow-77-cic-unsw-v2",
+            "feature_source": "backend/ml/artifacts/rf_ids_features.json",
+            "features_count": len(CANONICAL_FEATURES),
+            "train_datasets": ["CIC-IDS2017"] + (["UNSW-NB15"] if unsw_path else []),
         },
         "data_summary": {
             "cic_rows_before_dedup": int(cic_bundle.rows_before_dedup),
@@ -172,15 +134,19 @@ def train(cic_path: str, unsw_path: str | None = None) -> dict:
         results["cross_dataset"] = evaluate_bundle(pipeline, unsw_bundle)
 
     dump(pipeline, MODEL_PATH)
+
     METRICS_PATH.write_text(json.dumps(results, indent=2), encoding="utf-8")
     MODEL_INFO_PATH.write_text(
         json.dumps(
             {
                 "model_name": "Random Forest",
-                "model_version": "rf-cic-unsw-v1",
+                "model_version": "rf-flow-77-cic-unsw-v2",
+                "feature_source": "backend/ml/artifacts/rf_ids_features.json",
+                "features_count": len(CANONICAL_FEATURES),
                 "features": CANONICAL_FEATURES,
-                "train_dataset": "CIC-IDS2017",
-                "cross_dataset": "CIC-UNSW-NB15 (Augmented)" if unsw_path else None,
+                "train_datasets": ["CIC-IDS2017"] + (["UNSW-NB15"] if unsw_path else []),
+                "primary_input_mode": "direct canonical 77-feature flow payload",
+                "legacy_compatibility_mode": "simplified event payload mapped into the 77-feature schema with degraded approximation",
                 "artifacts": {
                     "model_path": str(MODEL_PATH),
                     "metrics_path": str(METRICS_PATH),
@@ -195,9 +161,9 @@ def train(cic_path: str, unsw_path: str | None = None) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train IDS Random Forest model.")
+    parser = argparse.ArgumentParser(description="Train IDS Random Forest model on 77 canonical flow features.")
     parser.add_argument("--cic", required=True, help="Path to CIC-IDS2017 CSV file or directory")
-    parser.add_argument("--unsw", required=False, help="Path to CIC-UNSW-NB15 augmented CSV file or directory")
+    parser.add_argument("--unsw", required=False, help="Path to UNSW-NB15 CSV file or directory")
     args = parser.parse_args()
 
     results = train(args.cic, args.unsw)
