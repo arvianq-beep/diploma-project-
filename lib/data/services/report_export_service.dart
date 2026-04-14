@@ -61,7 +61,7 @@ class ReportExportService {
             pw.Bullet(text: 'Label: ${incident.analysis.rawAiLabel}'),
             pw.Bullet(
               text:
-                  'Confidence: ${formatPercent(incident.analysis.rawConfidence)}',
+                  'Confidence: ${incident.analysis.rawConfidence.toStringAsFixed(2)}',
             ),
             pw.Bullet(text: 'Model version: ${incident.analysis.modelVersion}'),
             pw.Bullet(

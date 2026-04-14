@@ -127,7 +127,7 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
               children: [
                 Text(
                   'Model before verification: ${incident.analysis.rawAiLabel} '
-                  '(${formatPercent(incident.analysis.rawConfidence)})',
+                  '(${incident.analysis.rawConfidence.toStringAsFixed(2)})',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
                 const SizedBox(height: 16),

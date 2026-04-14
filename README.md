@@ -1,16 +1,16 @@
-# AI-driven Intrusion Detection System with Verification Layer
+# AI model for Secure Decision-Making in Cyber Threat Detection Systems
 
-Flutter diploma prototype backed by a Python ML inference service for tabular network events.
+Flutter diploma backed by a Python ML inference service for tabular network events.
 
 The system is intentionally built around one core idea:
 
 raw AI prediction is not trusted blindly.
 
-Every model output is passed through a separate verification layer before the application assigns the final status.
+Every model output is passed through a separate AI verification layer before the application assigns the final status.
 
 ## Thesis Topic
 
-AI-driven Intrusion Detection System with Verification Layer
+AI model for Secure Decision-Making in Cyber Threat Detection Systems
 
 ## What Problem the System Solves
 
@@ -43,54 +43,126 @@ Meaning:
 
 ```text
 Flutter App
-  ├─ Dashboard / Analysis / Event Details / Reports / About
+  ├─ Dashboard / Analysis / Event Details / Monitor / Reports / About
   ├─ Domain models
-  ├─ Verification layer
   ├─ Analyst workflow
   └─ PDF report export
 
 Python Backend
   ├─ Flask API
   ├─ ML training pipeline
+  ├─ Realtime monitoring
+  ├─ Verification layer
   ├─ Serialized model artifacts
   ├─ Inference wrapper
   └─ Metadata / dataset / report endpoints
 ```
 
-### Flutter structure
-
-```text
-lib/
-  core/
-  data/
-    repositories/
-    services/
-  domain/
-    models/
-  features/
-    analysis/
-    dashboard/
-    event_details/
-    home/
-    reports/
-    settings/
-  shared/
-    widgets/
-```
-
-### Backend structure
-
-```text
-backend/
-  ml/
-    preprocessing.py
-    train_model.py
-    inference.py
-    schema.py
-  server.py
-  storage.py
-  datasets_storage.py
-```
+├── README.md                          # Project documentation and diploma thesis context
+├── pubspec.yaml                       # Flutter dependency manifest
+│
+├── lib/                               # Flutter/Dart source code
+│   ├── main.dart                      # App entry point — calls runApp(DiplomaApp())
+│   ├── core/
+│   │   ├── app/
+│   │   │   └── app.dart               # MaterialApp configuration, theme, routing
+│   │   ├── theme/
+│   │   │   └── app_theme.dart         # ThemeData + StatusPalette extension
+│   │   └── utils/
+│   │       └── formatters.dart        # Date/percent formatting helpers
+│   ├── data/
+│   │   ├── repositories/
+│   │   │   ├── ids_repository.dart    # Abstract repository interface
+│   │   │   └── mock_ids_repository.dart  # Local fallback (no backend)
+│   │   └── services/
+│   │       ├── ids_api_service.dart          # All HTTP calls to Flask backend
+│   │       ├── ai_analysis_service.dart      # Client-side analysis orchestration
+│   │       ├── verification_service.dart     # Client-side verification helper
+│   │       ├── report_export_service.dart    # PDF/CSV export via `pdf` package
+│   │       ├── csv_event_import_service.dart # CSV → ThreatEvent parser (client-side)
+│   │       └── sample_event_service.dart     # Hard-coded demo event seed data
+│   ├── domain/
+│   │   └── models/
+│   │       ├── threat_event.dart          # Input event data model
+│   │       ├── incident_case.dart         # Composite: event + analysis + verification + decision
+│   │       ├── analysis_result.dart       # Stage 1 detector output model
+│   │       ├── verification_result.dart   # Stage 2 verifier output model
+│   │       ├── verification_check.dart    # Single named verification check
+│   │       ├── final_decision.dart        # Final verdict with timestamp
+│   │       ├── final_decision_status.dart # Enum: benign / verifiedThreat / suspicious
+│   │       ├── analyst_review.dart        # SOC analyst notes model
+│   │       ├── batch_analysis_summary.dart # Statistics over CSV batch results
+│   │       ├── realtime_event.dart        # Live flow result from SSE/poll
+│   │       ├── ml_model_info.dart         # Model version + metrics metadata
+│   │       └── report_model.dart          # Report export model
+│   ├── features/
+│   │   ├── home/
+│   │   │   ├── home_shell.dart        # Navigation shell (NavigationRail)
+│   │   │   └── app_controller.dart    # ChangeNotifier: global app state + business logic
+│   │   ├── dashboard/
+│   │   │   └── dashboard_screen.dart  # Summary stats, charts, recent events
+│   │   ├── analysis/
+│   │   │   └── analysis_screen.dart   # Event selector + run analysis UI
+│   │   ├── event_details/
+│   │   │   └── event_details_screen.dart  # Full 3-stage pipeline result display
+│   │   ├── realtime/
+│   │   │   └── realtime_monitor_screen.dart  # Live flow monitoring with start/stop
+│   │   ├── reports/
+│   │   │   └── reports_screen.dart    # Report list with PDF export
+│   │   └── settings/
+│   │       └── settings_screen.dart   # Model metadata display
+│   └── shared/
+│       └── widgets/
+│           ├── confidence_trend_chart.dart   # fl_chart line chart for confidence over time
+│           ├── distribution_chart.dart       # fl_chart bar/pie for status counts
+│           ├── pipeline_stage_card.dart      # Visual card for each pipeline stage
+│           ├── section_card.dart             # Reusable content card container
+│           ├── status_badge.dart             # Colored status pill (Benign/Suspicious/etc.)
+│           ├── summary_stat_card.dart        # KPI metric card
+│           └── verification_check_tile.dart  # Expandable pass/fail check row
+│
+├── backend/                           # Python Flask backend
+│   ├── server.py                      # Main Flask application — all HTTP endpoints
+│   ├── app.py                         # Secondary/dataset-related endpoints (legacy)
+│   ├── secure_ai.py                   # Legacy heuristic demo model (not used in prod)
+│   ├── storage.py                     # SQLite schema, init, and insert_report()
+│   ├── datasets_storage.py            # CSV upload management + datasets.json
+│   ├── requirements.txt               # Python dependencies
+│   ├── reports.db                     # SQLite database file (created at runtime)
+│   ├── datasets.json                  # Dataset metadata registry
+│   ├── uploads/                       # Uploaded CSV datasets stored here
+│   ├── ml/
+│   │   ├── __init__.py
+│   │   ├── README.md
+│   │   ├── schema.py                  # 77-feature FEATURE_SCHEMA + CIC_COLUMN_ALIASES
+│   │   ├── preprocessing.py           # Dataset harmonization for training
+│   │   ├── train_model.py             # RandomForest training script
+│   │   ├── inference.py               # MLPredictor class + PredictionOutput dataclass
+│   │   └── artifacts/
+│   │       ├── rf_ids_model.joblib    # Trained sklearn Pipeline (binary)
+│   │       ├── model_info.json        # Model version, feature list, training metadata
+│   │       ├── evaluation_metrics.json
+│   │       └── rf_ids_features.json   # Validated copy of FEATURE_SCHEMA (77 names)
+│   ├── verification/
+│   │   ├── __init__.py
+│   │   ├── schema.py                  # 30-feature VERIFIER_FEATURE_NAMES + status constants
+│   │   ├── features.py                # build_verification_features() + perturbation analysis
+│   │   ├── model.py                   # VerifierMLP class + load_artifacts() / save_artifacts()
+│   │   ├── inference.py               # SecureDecisionVerificationService + VerificationDecision
+│   │   ├── train_verifier.py          # MLP training script
+│   │   └── artifacts/
+│   │       ├── verifier_model.pt      # PyTorch state dict + normalization stats (binary)
+│   │       ├── verifier_model_info.json
+│   │       └── verifier_metrics.json
+│   └── realtime/
+│       ├── __init__.py
+│       ├── pipeline.py                # StreamMonitor: capture → flow → batch inference
+│       ├── flow.py                    # FlowAggregator, FlowRecord, extract_canonical_features()
+│       └── capture.py                 # PysharkCapture, ScapyCapture, SyntheticFlowSource
+│
+├── android/, ios/, windows/, web/, macos/   # Flutter platform build files
+├── .dart_tool/                        # Dart build cache
+└── build/                             # Flutter build output
 
 ## Datasets Used
 
@@ -131,7 +203,7 @@ The preprocessing pipeline:
 
 ## Chosen Model
 
-The current ML pipeline uses:
+The current ML pipeline uses: 
 
 - `Random Forest`
 
