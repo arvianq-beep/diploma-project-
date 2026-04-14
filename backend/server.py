@@ -13,6 +13,7 @@ from flask_cors import CORS
 
 from datasets_storage import list_datasets, save_uploaded_dataset
 from ml.inference import MLPredictor
+from ml.schema import CIC_COLUMN_ALIASES
 from storage import get_conn, init_db, insert_report
 
 
@@ -107,15 +108,31 @@ def _csv_dict_reader_from_upload(file_storage):
     return csv.DictReader(io.StringIO(body))
 
 
-def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> dict:
-    def normalize_protocol(value: str) -> str:
-        normalized = str(value).strip()
-        return {
-            "6": "TCP",
-            "17": "UDP",
-            "1": "ICMP",
-        }.get(normalized, normalized.upper() if normalized else "UNKNOWN")
+def _extract_canonical_features_from_row(row: dict[str, str]) -> dict:
+    """Try to read all 77 canonical features from a CSV dict row using CIC-style aliases.
 
+    Returns a dict of {canonical_name: float} for every feature that could be
+    resolved.  Features not found in the row are omitted (they will default to
+    0.0inside MLPredictor._normalize_features).
+    """
+    # Build a case-insensitive index of the row's keys for fast alias lookup.
+    row_index: dict[str, str] = {k.strip().lower(): k for k in row}
+    result: dict[str, float] = {}
+    for feature, aliases in CIC_COLUMN_ALIASES.items():
+        for alias in aliases:
+            raw_key = row_index.get(alias.strip().lower())
+            if raw_key is not None:
+                raw_val = str(row[raw_key]).strip()
+                if raw_val not in {"", "nan", "inf", "-inf"}:
+                    try:
+                        result[feature] = float(raw_val)
+                    except ValueError:
+                        pass
+                break
+    return result
+
+
+def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> dict:
     def read(*keys, default=""):
         for key in keys:
             if key in row and str(row[key]).strip() != "":
@@ -136,47 +153,54 @@ def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> d
         except (TypeError, ValueError):
             return int(default)
 
-    duration = read_float("duration_seconds", "duration", "dur", "Flow Duration", default=1.0)
-    if duration > 10000:
-        duration = duration / 1_000_000.0
+    def normalize_protocol(value: str) -> str:
+        normalized = str(value).strip()
+        return {"6": "TCP", "17": "UDP", "1": "ICMP"}.get(
+            normalized, normalized.upper() if normalized else "UNKNOWN"
+        )
 
-    bytes_kb = read_float(
-        "bytes_transferred_kb",
-        "bytes",
-        "flow_bytes",
-        "sbytes",
-        "Total Length of Fwd Packets",
-        default=0.0,
-    ) / 1024.0
+    # --- identity / metadata fields (unchanged) ---
+    source_ip = read("source_ip", "srcip", "Src IP", "Source IP", default="0.0.0.0")
+    destination_ip = read("destination_ip", "dstip", "Dst IP", "Destination IP", default="0.0.0.0")
+    protocol = normalize_protocol(read("protocol", "proto", "Protocol", default="UNKNOWN"))
+    label = read("Label", "label", "attack_cat", default="")
+
+    # --- attempt to extract all 77 canonical features from the row ---
+    canonical = _extract_canonical_features_from_row(row)
+
+    # Derive legacy fields as a fallback for non-CIC CSVs that lack canonical names.
+    destination_port = read_int("destination_port", "dsport", "Destination Port", "Dst Port", default=0)
+    source_port = read_int("source_port", "sport", "Src Port", "Source Port", default=0)
+    duration = read_float("duration_seconds", "duration", "dur", "Flow Duration", default=1.0)
+    if duration > 10_000:
+        # CIC raw files store duration in microseconds; convert here when
+        # the canonical extractor above has NOT already done so.
+        if "flow_duration" not in canonical:
+            duration = duration / 1_000_000.0
     flow_bytes_per_second = read_float(
         "Flow Bytes/s", "Flow Byts/s", "bytes_per_second", "flow_bytes_per_second", default=0.0
     )
-    if bytes_kb == 0.0 and flow_bytes_per_second > 0 and duration > 0:
-        bytes_kb = (flow_bytes_per_second * duration) / 1024.0
-    forward_packets = read_float(
-        "forward_packets", "spkts", "Tot Fwd Pkts", "Total Fwd Packets", default=0.0
-    )
-    backward_packets = read_float(
-        "backward_packets", "dpkts", "Tot Bwd Pkts", "Total Backward Packets", default=0.0
-    )
-    packets_per_second = read_float(
-        "packets_per_second", "Flow Packets/s", "Flow Pkts/s", "rate", default=0.0
-    )
+    forward_packets = read_float("forward_packets", "spkts", "Tot Fwd Pkts", "Total Fwd Packets", default=0.0)
+    backward_packets = read_float("backward_packets", "dpkts", "Tot Bwd Pkts", "Total Backward Packets", default=0.0)
+    packets_per_second = read_float("packets_per_second", "Flow Packets/s", "Flow Pkts/s", "rate", default=0.0)
     if packets_per_second == 0.0 and duration > 0:
         total_packets = forward_packets + backward_packets
         packets_per_second = total_packets / duration if duration else 0.0
+    bytes_kb = read_float(
+        "bytes_transferred_kb", "bytes", "flow_bytes", "sbytes",
+        "Total Length of Fwd Packets", default=0.0,
+    ) / 1024.0
+    if bytes_kb == 0.0 and flow_bytes_per_second > 0 and duration > 0:
+        bytes_kb = (flow_bytes_per_second * duration) / 1024.0
 
-    protocol = normalize_protocol(read("protocol", "proto", "Protocol", default="UNKNOWN"))
-    source_ip = read("source_ip", "srcip", "Src IP", "Source IP", default="0.0.0.0")
-    destination_ip = read("destination_ip", "dstip", "Dst IP", "Destination IP", default="0.0.0.0")
-    source_port = read_int("source_port", "sport", "Src Port", "Source Port", default=0)
-    destination_port = read_int("destination_port", "dsport", "Destination Port", "Dst Port", default=0)
-    label = read("Label", "label", "attack_cat", default="")
-
-    return {
+    event: dict = {
         "id": f"csv-{row_index}",
         "title": f"CSV Event {row_index}",
-        "description": f"Imported from {filename}" if not label else f"Imported from {filename} with dataset label {label}",
+        "description": (
+            f"Imported from {filename}"
+            if not label
+            else f"Imported from {filename} with dataset label {label}"
+        ),
         "source_ip": source_ip,
         "destination_ip": destination_ip,
         "source_port": source_port,
@@ -188,13 +212,28 @@ def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> d
         "failed_logins": read_int("failed_logins", default=0),
         "anomaly_score": min(max(read_float("anomaly_score", default=0.0), 0.0), 1.0),
         "context_risk_score": min(max(read_float("context_risk_score", default=0.0), 0.0), 1.0),
-        "known_bad_source": str(read("known_bad_source", default="false")).lower() == "true" or source_ip.startswith(("185.", "45.")),
+        "known_bad_source": (
+            str(read("known_bad_source", default="false")).lower() == "true"
+            or source_ip.startswith(("185.", "45."))
+        ),
         "off_hours_activity": str(read("off_hours_activity", default="false")).lower() == "true",
-        "repeated_attempts": str(read("repeated_attempts", default="false")).lower() == "true" or packets_per_second > 400 or destination_port == 22,
+        "repeated_attempts": (
+            str(read("repeated_attempts", default="false")).lower() == "true"
+            or packets_per_second > 400
+            or destination_port == 22
+        ),
         "sample_source": f"CSV Import: {filename}",
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "tags": ["csv-import", *([f"dataset-label:{label}"] if label else [])],
     }
+
+    # Merge extracted canonical features into the event dict.  When present,
+    # MLPredictor.predict_from_event() will detect them and use the primary
+    # 77-feature inference path instead of the legacy compat path.
+    if canonical:
+        event.update(canonical)
+
+    return event
 
 
 @app.get("/")

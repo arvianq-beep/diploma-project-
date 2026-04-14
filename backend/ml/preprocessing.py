@@ -31,32 +31,12 @@ def _find_column(columns: Iterable[str], aliases: list[str]) -> str | None:
     return None
 
 
-def _normalize_protocol(value) -> str:
-    if pd.isna(value):
-        return "UNKNOWN"
-
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped == "":
-            return "UNKNOWN"
-        if stripped.isdigit():
-            numeric = int(stripped)
-            return {6: "TCP", 17: "UDP", 1: "ICMP"}.get(numeric, stripped)
-        return stripped.upper()
-
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        numeric = int(value)
-        return {6: "TCP", 17: "UDP", 1: "ICMP"}.get(numeric, str(numeric))
-
-    return str(value).upper()
-
-
 def _coerce_numeric(series: pd.Series) -> pd.Series:
     clean = series.replace([np.inf, -np.inf], np.nan)
     return pd.to_numeric(clean, errors="coerce")
 
 
-def _empty_series(length: int, fill_value=0.0) -> pd.Series:
+def _empty_series(length: int, fill_value: float = 0.0) -> pd.Series:
     return pd.Series([fill_value] * length)
 
 
@@ -70,10 +50,8 @@ def _label_to_binary(series: pd.Series) -> pd.Series:
     def normalize(value) -> int:
         if pd.isna(value):
             return 0
-
         if isinstance(value, (int, float, np.integer, np.floating)):
             return 1 if float(value) > 0 else 0
-
         text = str(value).strip().lower()
         if text in {"0", "normal", "benign", "benign traffic"}:
             return 0
@@ -83,55 +61,39 @@ def _label_to_binary(series: pd.Series) -> pd.Series:
 
 
 def harmonize_frame(frame: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
+    """Map raw dataset columns onto the 77 canonical feature names.
+
+    All 77 features are numeric.  Any feature whose source column cannot be
+    found in the raw frame is filled with 0.0.
+    """
     frame = _clean_frame(frame)
     aliases = CIC_COLUMN_ALIASES if dataset_name == "cic_ids2017" else UNSW_COLUMN_ALIASES
     length = len(frame)
     output = pd.DataFrame(index=frame.index)
 
     for feature in CANONICAL_FEATURES:
-        source_column = _find_column(frame.columns, aliases[feature])
+        feature_aliases = aliases.get(feature, [feature])
+        source_column = _find_column(frame.columns, feature_aliases)
         if source_column is None:
             output[feature] = _empty_series(length)
-            continue
-
-        column = frame[source_column]
-        if feature == "protocol":
-            output[feature] = column.apply(_normalize_protocol)
         else:
-            output[feature] = _coerce_numeric(column)
+            output[feature] = _coerce_numeric(frame[source_column])
 
+    # CIC-IDS2017 stores Flow Duration in microseconds; convert to seconds so
+    # all time-based features share the same unit at inference time.
     if dataset_name == "cic_ids2017":
-        # CIC flow duration is typically stored in microseconds.
-        output["duration"] = output["duration"] / 1_000_000.0
+        output["flow_duration"] = output["flow_duration"] / 1_000_000.0
 
-    output["duration"] = output["duration"].fillna(0.0).clip(lower=0.0)
-    output["source_port"] = output["source_port"].fillna(0).clip(lower=0, upper=65535)
-    output["destination_port"] = output["destination_port"].fillna(0).clip(lower=0, upper=65535)
+    # Clip and fill per-feature constraints.
+    output["flow_duration"] = output["flow_duration"].fillna(0.0).clip(lower=0.0)
+    output["destination_port"] = (
+        output["destination_port"].fillna(0).clip(lower=0, upper=65535)
+    )
 
-    for feature in (
-        "forward_packets",
-        "backward_packets",
-        "forward_bytes",
-        "backward_bytes",
-        "bytes_per_second",
-        "packets_per_second",
-    ):
-        output[feature] = output[feature].fillna(0.0).clip(lower=0.0)
-
-    calculated_bytes_rate = (output["forward_bytes"] + output["backward_bytes"]) / output[
-        "duration"
-    ].replace(0, np.nan)
-    calculated_packets_rate = (output["forward_packets"] + output["backward_packets"]) / output[
-        "duration"
-    ].replace(0, np.nan)
-
-    output["bytes_per_second"] = output["bytes_per_second"].replace(0, np.nan).fillna(
-        calculated_bytes_rate
-    ).fillna(0.0)
-    output["packets_per_second"] = output["packets_per_second"].replace(0, np.nan).fillna(
-        calculated_packets_rate
-    ).fillna(0.0)
-    output["protocol"] = output["protocol"].fillna("UNKNOWN")
+    # All remaining features must be non-negative.
+    for feature in CANONICAL_FEATURES:
+        if feature not in {"flow_duration", "destination_port"}:
+            output[feature] = output[feature].fillna(0.0).clip(lower=0.0)
 
     return output[CANONICAL_FEATURES]
 
@@ -167,7 +129,10 @@ def load_dataset_bundle(dataset_dir: str | Path, dataset_name: str) -> DatasetBu
         frame = frame.drop_duplicates().reset_index(drop=True)
         rows_after_dedup += int(len(frame))
 
-        label_column = _find_column(frame.columns, ["Label", "label", "attack_cat", "attack_cat ", "attack"])
+        label_column = _find_column(
+            frame.columns,
+            ["Label", "label", "attack_cat", "attack_cat ", "attack"],
+        )
         if label_column is None and "label" in frame.columns:
             label_column = "label"
         if label_column is None:
@@ -188,10 +153,19 @@ def load_dataset_bundle(dataset_dir: str | Path, dataset_name: str) -> DatasetBu
                 "missing_values_after_inf_replacement": missing_after_inf,
                 "inf_values": inf_values,
                 "duplicate_rows_removed": duplicate_rows,
-                "raw_label_distribution": frame[label_column].astype(str).str.strip().value_counts(dropna=False).to_dict(),
+                "raw_label_distribution": (
+                    frame[label_column]
+                    .astype(str)
+                    .str.strip()
+                    .value_counts(dropna=False)
+                    .to_dict()
+                ),
                 "binary_label_distribution": {
                     str(key): int(value)
-                    for key, value in binary_labels.value_counts(dropna=False).sort_index().to_dict().items()
+                    for key, value in binary_labels.value_counts(dropna=False)
+                    .sort_index()
+                    .to_dict()
+                    .items()
                 },
             }
         )

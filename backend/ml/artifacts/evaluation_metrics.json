@@ -1,21 +1,11 @@
 {
   "model": {
     "model_name": "Random Forest",
-    "model_version": "rf-cic-unsw-v1",
-    "features": [
-      "protocol",
-      "source_port",
-      "destination_port",
-      "duration",
-      "forward_packets",
-      "backward_packets",
-      "forward_bytes",
-      "backward_bytes",
-      "bytes_per_second",
-      "packets_per_second"
-    ],
+    "model_version": "rf-cic-77f-v2",
+    "feature_count": 77,
+    "features_ref": "rf_ids_features.json",
     "train_dataset": "CIC-IDS2017",
-    "cross_dataset_evaluation": null
+    "cross_dataset_evaluation": "UNSW-NB15 (Augmented)"
   },
   "data_summary": {
     "cic_rows_before_dedup": 2830743,

@@ -58,6 +58,13 @@ class AnalysisScreen extends StatelessWidget {
                           : 'Backend offline',
                     ),
                   ),
+                  Chip(
+                    label: Text('Features: 77-feature schema'),
+                    backgroundColor:
+                        controller.modelInfo.backendReachable
+                        ? Colors.green.shade50
+                        : null,
+                  ),
                 ],
               ),
             ),
@@ -194,7 +201,7 @@ class AnalysisScreen extends StatelessWidget {
               ),
           ],
         ),
-        if (controller.isAnalyzing)
+        if (controller.isWorking)
           Positioned.fill(
             child: Container(
               color: Colors.white.withValues(alpha: 0.72),
@@ -214,7 +221,7 @@ class AnalysisScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 16),
                         Text(
-                          controller.isImporting
+                          controller.isDatasetBusy
                               ? 'Processing dataset'
                               : 'Processing event',
                           style: Theme.of(context).textTheme.titleMedium,
@@ -291,10 +298,10 @@ class _EventSelector extends StatelessWidget {
             runSpacing: 12,
             children: [
               FilledButton.icon(
-                onPressed: controller.isAnalyzing
+                onPressed: controller.isWorking
                     ? null
                     : controller.runAnalysis,
-                icon: controller.isAnalyzing && !controller.isImporting
+                icon: controller.isAnalyzing && !controller.isDatasetBusy
                     ? const SizedBox(
                         width: 18,
                         height: 18,
@@ -302,25 +309,30 @@ class _EventSelector extends StatelessWidget {
                       )
                     : const Icon(Icons.play_arrow),
                 label: Text(
-                  controller.isAnalyzing && !controller.isImporting
+                  controller.isAnalyzing && !controller.isDatasetBusy
                       ? 'Analyzing...'
                       : 'Run analysis',
                 ),
               ),
               OutlinedButton.icon(
-                onPressed: controller.isAnalyzing
+                onPressed: controller.isWorking
                     ? null
                     : () async {
-                        final result = await FilePicker.platform.pickFiles(
-                          type: FileType.custom,
-                          allowedExtensions: const ['csv'],
-                        );
-                        final path = result?.files.single.path;
-                        if (path != null) {
-                          await controller.importFromFile(path);
+                        controller.beginDatasetSelection();
+                        try {
+                          final result = await FilePicker.platform.pickFiles(
+                            type: FileType.custom,
+                            allowedExtensions: const ['csv'],
+                          );
+                          final path = result?.files.single.path;
+                          if (path != null) {
+                            await controller.importFromFile(path);
+                          }
+                        } finally {
+                          controller.endDatasetSelection();
                         }
                       },
-                icon: controller.isAnalyzing && controller.isImporting
+                icon: controller.isDatasetBusy
                     ? const SizedBox(
                         width: 18,
                         height: 18,
@@ -328,8 +340,10 @@ class _EventSelector extends StatelessWidget {
                       )
                     : const Icon(Icons.upload_file_outlined),
                 label: Text(
-                  controller.isAnalyzing && controller.isImporting
+                  controller.isImporting
                       ? 'Importing CSV...'
+                      : controller.isPickingDataset
+                      ? 'Selecting CSV...'
                       : 'Import CSV',
                 ),
               ),
@@ -386,6 +400,18 @@ class _EventSummary extends StatelessWidget {
                   'Context ${event.contextRiskScore.toStringAsFixed(2)}',
                 ),
               ),
+              if (event.hasPrimaryFlowFeatures)
+                Chip(
+                  label: Text(
+                    '77-feature (${event.flowFeatures.length} fields)',
+                  ),
+                  backgroundColor: Colors.green.shade50,
+                )
+              else
+                Chip(
+                  label: const Text('Legacy compat (8 fields)'),
+                  backgroundColor: Colors.orange.shade50,
+                ),
             ],
           ),
         ],

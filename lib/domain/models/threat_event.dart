@@ -20,6 +20,17 @@ class ThreatEvent {
   final DateTime capturedAt;
   final List<String> tags;
 
+  /// Canonical 77-feature flow record.
+  ///
+  /// When non-empty the backend uses the primary 77-feature inference path.
+  /// When empty the backend falls back to the 8-field legacy compat mapping.
+  /// Keys must match the canonical names defined in rf_ids_features.json.
+  final Map<String, double> flowFeatures;
+
+  /// Returns true when this event carries a full (or partial) canonical
+  /// 77-feature record that will trigger the primary ML path on the backend.
+  bool get hasPrimaryFlowFeatures => flowFeatures.isNotEmpty;
+
   const ThreatEvent({
     required this.id,
     required this.title,
@@ -41,5 +52,6 @@ class ThreatEvent {
     required this.sampleSource,
     required this.capturedAt,
     required this.tags,
+    this.flowFeatures = const {},
   });
 }

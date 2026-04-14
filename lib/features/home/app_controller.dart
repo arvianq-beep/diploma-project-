@@ -21,6 +21,7 @@ class AppController extends ChangeNotifier {
   bool _initializing = true;
   bool _isAnalyzing = false;
   bool _isImporting = false;
+  bool _isPickingDataset = false;
   bool _isExporting = false;
   String? _error;
   AnalysisPhase _analysisPhase = AnalysisPhase.idle;
@@ -36,6 +37,9 @@ class AppController extends ChangeNotifier {
   bool get initializing => _initializing;
   bool get isAnalyzing => _isAnalyzing;
   bool get isImporting => _isImporting;
+  bool get isPickingDataset => _isPickingDataset;
+  bool get isDatasetBusy => _isPickingDataset || _isImporting;
+  bool get isWorking => _isAnalyzing || _isPickingDataset;
   bool get isExporting => _isExporting;
   String? get error => _error;
   AnalysisPhase get analysisPhase => _analysisPhase;
@@ -48,6 +52,10 @@ class AppController extends ChangeNotifier {
   BatchAnalysisSummary? get lastBatchSummary => _lastBatchSummary;
 
   String get loadingMessage {
+    if (_isPickingDataset) {
+      return 'Preparing dataset import and waiting for the CSV file selection.';
+    }
+
     if (_isImporting) {
       return 'Importing CSV dataset and analyzing events. This can take a few seconds.';
     }
@@ -87,6 +95,19 @@ class AppController extends ChangeNotifier {
 
   void selectSample(ThreatEvent event) {
     _selectedEvent = event;
+    notifyListeners();
+  }
+
+  void beginDatasetSelection() {
+    if (_isPickingDataset) return;
+    _error = null;
+    _isPickingDataset = true;
+    notifyListeners();
+  }
+
+  void endDatasetSelection() {
+    if (!_isPickingDataset) return;
+    _isPickingDataset = false;
     notifyListeners();
   }
 

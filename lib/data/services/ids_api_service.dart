@@ -75,27 +75,43 @@ class IdsApiService {
   }
 
   Map<String, dynamic> _eventToJson(ThreatEvent event) {
-    return {
+    // Start with canonical 77-feature fields when available.
+    // The backend detects these keys and uses the primary ML path.
+    // Legacy fields below are still included for metadata and as a compat
+    // fallback in case flowFeatures is empty.
+    final json = <String, dynamic>{
+      ...event.flowFeatures,
+
+      // --- event metadata ---
       'id': event.id,
       'title': event.title,
       'description': event.description,
       'source_ip': event.sourceIp,
       'destination_ip': event.destinationIp,
       'source_port': event.sourcePort,
-      'destination_port': event.destinationPort,
       'protocol': event.protocol,
+      'sample_source': event.sampleSource,
+      'captured_at': event.capturedAt.toIso8601String(),
+      'tags': event.tags,
+
+      // --- legacy flow fields (used by compat path when flowFeatures is empty) ---
       'bytes_transferred_kb': event.bytesTransferredKb,
       'duration_seconds': event.durationSeconds,
       'packets_per_second': event.packetsPerSecond,
+
+      // --- context / risk enrichment ---
       'failed_logins': event.failedLogins,
       'anomaly_score': event.anomalyScore,
       'context_risk_score': event.contextRiskScore,
       'known_bad_source': event.knownBadSource,
       'off_hours_activity': event.offHoursActivity,
       'repeated_attempts': event.repeatedAttempts,
-      'sample_source': event.sampleSource,
-      'captured_at': event.capturedAt.toIso8601String(),
-      'tags': event.tags,
     };
+
+    // Ensure destination_port comes from the canonical field if already set
+    // by flowFeatures, otherwise fall back to the ThreatEvent field.
+    json.putIfAbsent('destination_port', () => event.destinationPort);
+
+    return json;
   }
 }
