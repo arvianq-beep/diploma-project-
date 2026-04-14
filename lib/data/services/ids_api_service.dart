@@ -6,6 +6,7 @@ import 'package:diploma_application_ml/domain/models/final_decision.dart';
 import 'package:diploma_application_ml/domain/models/final_decision_status.dart';
 import 'package:diploma_application_ml/domain/models/incident_case.dart';
 import 'package:diploma_application_ml/domain/models/ml_model_info.dart';
+import 'package:diploma_application_ml/domain/models/realtime_event.dart';
 import 'package:diploma_application_ml/domain/models/threat_event.dart';
 import 'package:diploma_application_ml/domain/models/verification_check.dart';
 import 'package:diploma_application_ml/domain/models/verification_result.dart';
@@ -191,6 +192,158 @@ class IdsApiService {
       default:
         return FinalDecisionStatus.suspicious;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Real-time monitoring
+  // ---------------------------------------------------------------------------
+
+  /// Start the backend real-time monitor.
+  ///
+  /// [source] — "synthetic" | "csv" | "pyshark" | "scapy"
+  /// [csvPath] — required when source == "csv"
+  /// [batchSize] — flows per inference batch (default 32)
+  Future<void> startRealtime({
+    String source = 'synthetic',
+    int batchSize = 32,
+    double rateLimit = 0.05,
+    String? interface,
+  }) async {
+    final body = <String, dynamic>{
+      'source': source,
+      'batch_size': batchSize,
+      'rate_limit': rateLimit,
+      if (interface != null && interface.isNotEmpty) 'interface': interface,
+    };
+    final response = await _client.post(
+      Uri.parse('$baseUrl/api/realtime/start'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(body),
+    );
+    if (response.statusCode == 409) return; // already running — treat as ok
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final msg =
+          (jsonDecode(response.body) as Map<String, dynamic>?)?['error'] ??
+          'start failed';
+      throw Exception('Realtime start failed: $msg');
+    }
+  }
+
+  /// Stop the backend real-time monitor.
+  Future<void> stopRealtime() async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/api/realtime/stop'),
+    );
+    if (response.statusCode == 409) return; // already stopped — treat as ok
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final msg =
+          (jsonDecode(response.body) as Map<String, dynamic>?)?['error'] ??
+          'stop failed';
+      throw Exception('Realtime stop failed: $msg');
+    }
+  }
+
+  /// Poll for new results since the last call.
+  ///
+  /// Returns a record of (events, isRunning).
+  Future<({List<RealtimeEvent> events, bool running})> pollRealtimeResults()
+      async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl/api/realtime/results'),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Realtime poll failed: ${response.statusCode}');
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final running = data['running'] == true;
+    final events = ((data['results'] as List?) ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(RealtimeEvent.fromJson)
+        .toList();
+    return (events: events, running: running);
+  }
+
+  /// Returns available network interfaces for pyshark/scapy, filtered to
+  /// physical adapters only. Each entry: {value, label}.
+  Future<List<({String value, String label})>> fetchRealtimeInterfaces(
+    String source,
+  ) async {
+    try {
+      final response = await _client.get(
+        Uri.parse('$baseUrl/api/realtime/interfaces'),
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) return [];
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+      if (source == 'pyshark') {
+        final list = (data['pyshark'] as List?) ?? const [];
+        return list
+            .whereType<Map<String, dynamic>>()
+            .where((m) {
+              final name = m['name'] as String? ?? '';
+              final desc = m['description'] as String? ?? '';
+              // Keep only real NPF GUID adapters; skip loopback, etwdump, WAN miniports
+              return name.contains(r'\Device\NPF_{') &&
+                  !desc.toLowerCase().contains('loopback') &&
+                  !desc.toLowerCase().contains('wan miniport');
+            })
+            .map((m) {
+              final name = m['name'] as String? ?? '';
+              final desc = m['description'] as String? ?? '';
+              // Extract bare GUID — backend will rewrap it
+              final guid = name
+                  .replaceAll(r'\Device\NPF_{', '')
+                  .replaceAll('}', '');
+              return (value: guid, label: desc.isNotEmpty ? desc : guid);
+            })
+            .toList();
+      }
+
+      if (source == 'scapy') {
+        final list = (data['scapy'] as List?) ?? const [];
+        return list
+            .whereType<Map<String, dynamic>>()
+            .where((m) {
+              final ips = (m['ips'] as List?) ?? const [];
+              final ipv4 = ips.where(
+                (ip) => !ip.toString().contains(':'),
+              );
+              final desc = (m['description'] as String? ?? '').toLowerCase();
+              return ipv4.isNotEmpty &&
+                  !desc.contains('loopback') &&
+                  !desc.contains('wan miniport') &&
+                  !desc.contains('teredo') &&
+                  !desc.contains('6to4');
+            })
+            .map((m) {
+              final name = m['name'] as String? ?? '';
+              final desc = m['description'] as String? ?? '';
+              final ipv4 = ((m['ips'] as List?) ?? const [])
+                  .where((ip) => !ip.toString().contains(':'))
+                  .join(', ');
+              return (
+                value: name,
+                label: ipv4.isNotEmpty ? '$desc  ($ipv4)' : desc,
+              );
+            })
+            .toList();
+      }
+
+      return [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Fetch monitor status without draining results.
+  Future<Map<String, dynamic>> fetchRealtimeStatus() async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl/api/realtime/status'),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return {'running': false};
+    }
+    return (jsonDecode(response.body) as Map<String, dynamic>?) ?? {};
   }
 
   Map<String, dynamic> _eventToJson(ThreatEvent event) {

@@ -76,6 +76,10 @@ class StreamResult:
     # Indicators from Stage 1
     triggered_indicators: list[str]
 
+    # Verification layer checks (the 5 structured tests from Stage 2)
+    verification_checks: list[dict]
+    verification_summary: str
+
     def to_sse_dict(self) -> dict[str, Any]:
         """Compact representation for SSE / JSON serialisation."""
         return {
@@ -92,6 +96,8 @@ class StreamResult:
             "verification_confidence": round(self.verification_confidence, 4),
             "recommended_action": self.recommended_action,
             "triggered_indicators": self.triggered_indicators,
+            "verification_checks": self.verification_checks,
+            "verification_summary": self.verification_summary,
         }
 
 
@@ -107,14 +113,12 @@ class StreamMonitor:
     Parameters
     ----------
     source : str | BaseCapture
-        Either a source name ("pyshark", "scapy", "csv", "synthetic") or an
+        Either a source name ("pyshark", "scapy", "synthetic") or an
         already-constructed BaseCapture instance.
     interface : str
         Network interface passed to pyshark/scapy.
-    csv_path : str | None
-        CSV path for CsvReplaySource.
     rate_limit : float
-        Seconds between packets for csv/synthetic sources.
+        Seconds between packets for synthetic source.
     attack_ratio : float
         Attack fraction for synthetic source.
     seed : int | None
@@ -137,7 +141,6 @@ class StreamMonitor:
         source: str | BaseCapture = "synthetic",
         *,
         interface: str = "eth0",
-        csv_path: str | None = None,
         rate_limit: float = 0.05,
         attack_ratio: float = 0.3,
         seed: int | None = None,
@@ -151,7 +154,6 @@ class StreamMonitor:
             self._capture: BaseCapture = make_capture_source(
                 source,
                 interface=interface,
-                csv_path=csv_path,
                 rate_limit=rate_limit,
                 attack_ratio=attack_ratio,
                 seed=seed,
@@ -171,6 +173,11 @@ class StreamMonitor:
         self._flow_queue: queue.Queue[FlowRecord | object] = queue.Queue(maxsize=512)
         self._predictor = None
         self._verifier = None
+
+        # Diagnostics
+        self._packets_received: int = 0
+        self._flows_completed: int = 0
+        self._capture_error: str | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -251,6 +258,11 @@ class StreamMonitor:
             "batch_size": self.batch_size,
             "flush_interval_s": self.flush_interval_s,
             "flow_timeout_s": self.flow_timeout_s,
+            "packets_received": self._packets_received,
+            "flows_completed": self._flows_completed,
+            "capture_error": self._capture_error,
+            "capture_thread_alive": self._capture_thread.is_alive() if self._capture_thread else False,
+            "inference_thread_alive": self._inference_thread.is_alive() if self._inference_thread else False,
         }
 
     # ------------------------------------------------------------------
@@ -273,31 +285,40 @@ class StreamMonitor:
         aggregator = FlowAggregator(timeout_s=self.flow_timeout_s)
         last_flush = time.monotonic()
 
-        for pkt in self._capture:
-            if not self._running.is_set():
-                break
+        try:
+            for pkt in self._capture:
+                if not self._running.is_set():
+                    break
 
-            aggregator.ingest(pkt)
+                self._packets_received += 1
+                aggregator.ingest(pkt)
 
-            now = time.monotonic()
-            if (now - last_flush) >= self.flow_timeout_s:
-                aggregator.flush_timeouts(now)
-                last_flush = now
+                now = time.monotonic()
+                if (now - last_flush) >= self.flow_timeout_s:
+                    aggregator.flush_timeouts(now)
+                    last_flush = now
 
+                for flow in aggregator.drain_completed():
+                    self._flows_completed += 1
+                    try:
+                        self._flow_queue.put(flow, timeout=1.0)
+                    except queue.Full:
+                        pass  # drop if inference is too slow
+
+        except Exception as exc:
+            self._capture_error = f"{type(exc).__name__}: {exc}"
+            print(f"[realtime] Capture thread error: {self._capture_error}", file=sys.stderr)
+
+        finally:
+            # drain remaining open flows on shutdown
+            aggregator.flush_timeouts(time.monotonic())
             for flow in aggregator.drain_completed():
+                self._flows_completed += 1
                 try:
-                    self._flow_queue.put(flow, timeout=1.0)
+                    self._flow_queue.put_nowait(flow)
                 except queue.Full:
-                    pass  # drop if inference is too slow
-
-        # drain remaining open flows on shutdown
-        aggregator.flush_timeouts(time.monotonic())
-        for flow in aggregator.drain_completed():
-            try:
-                self._flow_queue.put_nowait(flow)
-            except queue.Full:
-                pass
-        self._flow_queue.put(_STOP_SENTINEL)
+                    pass
+            self._flow_queue.put(_STOP_SENTINEL)
 
     # ------------------------------------------------------------------
     # Inference thread
@@ -383,6 +404,7 @@ class StreamMonitor:
 
             src_ip, dst_ip, src_port, dst_port, proto = flow.key
 
+            ver_details = ver_decision.verification_details if ver_decision else {}
             result = StreamResult(
                 processed_at=time.time(),
                 src_ip=src_ip,
@@ -410,6 +432,8 @@ class StreamMonitor:
                 ),
                 feature_snapshot=snap,
                 triggered_indicators=det_out.triggered_indicators,
+                verification_checks=ver_details.get("checks", []),
+                verification_summary=ver_details.get("summary", ""),
             )
             results.append(result)
             self._buffer.append(result)

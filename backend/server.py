@@ -4,11 +4,32 @@ import csv
 import io
 import json
 import os
+import re
+import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, request
+# Matches a bare GUID like  256FC667-8A70-46BB-8C44-6AE50447293F
+_GUID_RE = re.compile(
+    r'^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+)
+
+
+def _normalize_interface(iface: str) -> str:
+    """On Windows, wrap a bare GUID into the Npcap device path.
+
+    '256FC667-8A70-...' → r'\\Device\\NPF_{256FC667-8A70-...}'
+    On macOS/Linux or when the full path is already present, return unchanged.
+    """
+    iface = iface.strip()
+    if sys.platform == "win32" and _GUID_RE.match(iface):
+        return rf"\Device\NPF_{{{iface}}}"
+    return iface
+
+from flask import Flask, Response, jsonify, request, stream_with_context
 from flask_cors import CORS
 
 from datasets_storage import list_datasets, save_uploaded_dataset
@@ -25,6 +46,21 @@ init_db()
 
 predictor: MLPredictor | None = None
 verifier: SecureDecisionVerificationService | None = None
+
+# ---------------------------------------------------------------------------
+# Real-time monitor — single global instance, created lazily on /start
+# ---------------------------------------------------------------------------
+_monitor_lock = threading.Lock()
+_rt_monitor = None
+
+
+def _get_monitor():
+    return _rt_monitor
+
+
+def _set_monitor(m):
+    global _rt_monitor
+    _rt_monitor = m
 
 
 def get_predictor() -> MLPredictor:
@@ -592,8 +628,155 @@ def export_reports():
     )
 
 
+# ---------------------------------------------------------------------------
+# Real-time endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/realtime/start")
+def realtime_start():
+    with _monitor_lock:
+        monitor = _get_monitor()
+        if monitor is not None and monitor.is_running:
+            return jsonify({"error": "Monitor is already running. Stop it first."}), 409
+
+        body = request.get_json(silent=True) or {}
+        source = body.get("source", "synthetic")
+        interface = _normalize_interface(body.get("interface", "eth0"))
+        batch_size = int(body.get("batch_size", 32))
+        rate_limit = float(body.get("rate_limit", 0.05))
+        attack_ratio = float(body.get("attack_ratio", 0.3))
+
+        if source not in ("pyshark", "scapy", "synthetic"):
+            return jsonify({"error": f"Unknown source '{source}'. Choose: pyshark, scapy, synthetic."}), 400
+
+        try:
+            from realtime.pipeline import StreamMonitor
+            m = StreamMonitor(
+                source=source,
+                interface=interface,
+                rate_limit=rate_limit,
+                attack_ratio=attack_ratio,
+                batch_size=batch_size,
+                console_output=True,
+            )
+            _set_monitor(m)
+            t = threading.Thread(target=m.start, kwargs={"blocking": True}, daemon=True)
+            t.start()
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    return jsonify({"status": "started", "source": source, "batch_size": batch_size}), 200
+
+
+@app.post("/api/realtime/stop")
+def realtime_stop():
+    with _monitor_lock:
+        monitor = _get_monitor()
+        if monitor is None or not monitor.is_running:
+            return jsonify({"error": "No monitor is currently running."}), 409
+        monitor.stop()
+        _set_monitor(None)
+    return jsonify({"status": "stopped"}), 200
+
+
+@app.get("/api/realtime/status")
+def realtime_status():
+    monitor = _get_monitor()
+    if monitor is None:
+        return jsonify({"running": False, "buffer_size": 0}), 200
+    return jsonify(monitor.status()), 200
+
+
+@app.get("/api/realtime/debug")
+def realtime_debug():
+    """Diagnostic endpoint — returns full monitor state including counters and errors."""
+    monitor = _get_monitor()
+    if monitor is None:
+        return jsonify({"monitor": None, "running": False}), 200
+    return jsonify(monitor.status()), 200
+
+
+@app.get("/api/realtime/interfaces")
+def realtime_interfaces():
+    """List all available network interfaces with their descriptions."""
+    result: dict = {"scapy": [], "pyshark": [], "errors": {}}
+
+    # --- scapy ---
+    try:
+        from scapy.arch.windows import get_windows_if_list  # type: ignore
+        for iface in get_windows_if_list():
+            name: str = iface.get("name", "")
+            guid = name.replace(r"\Device\NPF_", "").strip("{}")
+            result["scapy"].append({
+                "guid": guid,
+                "name": name,
+                "description": iface.get("description", ""),
+                "ips": iface.get("ips", []),
+            })
+    except Exception as exc:
+        result["errors"]["scapy"] = str(exc)
+
+    # --- pyshark / tshark ---
+    try:
+        import subprocess
+        proc = subprocess.run(
+            ["tshark", "-D"],
+            capture_output=True, text=True, timeout=5,
+        )
+        lines = proc.stdout.strip().splitlines()
+        for line in lines:
+            # format: "1. \Device\NPF_{GUID} (Description)"
+            parts = line.split(". ", 1)
+            if len(parts) == 2:
+                rest = parts[1]
+                desc_start = rest.find("(")
+                iface_name = rest[:desc_start].strip() if desc_start != -1 else rest.strip()
+                desc = rest[desc_start + 1:rest.rfind(")")] if desc_start != -1 else ""
+                result["pyshark"].append({"name": iface_name, "description": desc})
+    except Exception as exc:
+        result["errors"]["pyshark"] = str(exc)
+
+    return jsonify(result), 200
+
+
+@app.get("/api/realtime/results")
+def realtime_results():
+    monitor = _get_monitor()
+    if monitor is None:
+        return jsonify({"results": [], "running": False}), 200
+    items = monitor.drain_results()
+    return jsonify({
+        "results": [r.to_sse_dict() for r in items],
+        "running": monitor.is_running,
+    }), 200
+
+
+@app.get("/api/realtime/stream")
+def realtime_stream():
+    def _generate():
+        last_hb = time.time()
+        while True:
+            m = _get_monitor()
+            if m is not None:
+                for result in m.drain_results():
+                    payload = json.dumps(result.to_sse_dict())
+                    yield f"data: {payload}\n\n"
+            now = time.time()
+            if now - last_hb >= 15:
+                yield ": heartbeat\n\n"
+                last_hb = now
+            time.sleep(0.2)
+
+    return Response(
+        stream_with_context(_generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 if __name__ == "__main__":
     if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or __name__ == "__main__":
         predictor = MLPredictor()
         verifier = SecureDecisionVerificationService(predictor)
     app.run(host="0.0.0.0", port=5001, debug=True, use_reloader=True)
+

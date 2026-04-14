@@ -7,6 +7,7 @@ import 'package:diploma_application_ml/domain/models/batch_analysis_summary.dart
 import 'package:diploma_application_ml/domain/models/final_decision_status.dart';
 import 'package:diploma_application_ml/domain/models/incident_case.dart';
 import 'package:diploma_application_ml/domain/models/ml_model_info.dart';
+import 'package:diploma_application_ml/domain/models/realtime_event.dart';
 import 'package:diploma_application_ml/domain/models/report_model.dart';
 import 'package:diploma_application_ml/domain/models/threat_event.dart';
 
@@ -156,6 +157,33 @@ class IdsRepository {
   Future<String> exportReport(ReportModel report) {
     return _reportExportService.exportReport(report);
   }
+
+  // ---------------------------------------------------------------------------
+  // Real-time monitoring
+  // ---------------------------------------------------------------------------
+
+  Future<void> startRealtime({
+    String source = 'synthetic',
+    int batchSize = 32,
+    double rateLimit = 0.05,
+    String? interface,
+  }) {
+    return _apiService.startRealtime(
+      source: source,
+      batchSize: batchSize,
+      rateLimit: rateLimit,
+      interface: interface,
+    );
+  }
+
+  Future<void> stopRealtime() => _apiService.stopRealtime();
+
+  Future<List<({String value, String label})>> fetchRealtimeInterfaces(
+    String source,
+  ) => _apiService.fetchRealtimeInterfaces(source);
+
+  Future<({List<RealtimeEvent> events, bool running})> pollRealtimeResults() =>
+      _apiService.pollRealtimeResults();
 
   IncidentCase updateAnalystReview(
     IncidentCase incident, {

@@ -1,6 +1,7 @@
 import 'package:diploma_application_ml/features/analysis/analysis_screen.dart';
 import 'package:diploma_application_ml/features/dashboard/dashboard_screen.dart';
 import 'package:diploma_application_ml/features/home/app_controller.dart';
+import 'package:diploma_application_ml/features/realtime/realtime_monitor_screen.dart';
 import 'package:diploma_application_ml/features/reports/reports_screen.dart';
 import 'package:diploma_application_ml/features/settings/settings_screen.dart';
 import 'package:flutter/material.dart';
@@ -24,6 +25,7 @@ class HomeShell extends StatelessWidget {
         final screens = [
           DashboardScreen(controller: controller),
           AnalysisScreen(controller: controller),
+          RealtimeMonitorScreen(controller: controller),
           ReportsScreen(controller: controller),
           SettingsScreen(controller: controller),
         ];
@@ -33,20 +35,26 @@ class HomeShell extends StatelessWidget {
           bottomNavigationBar: NavigationBar(
             selectedIndex: controller.tabIndex,
             onDestinationSelected: controller.setTabIndex,
-            destinations: const [
-              NavigationDestination(
+            destinations: [
+              const NavigationDestination(
                 icon: Icon(Icons.dashboard_outlined),
                 label: 'Dashboard',
               ),
-              NavigationDestination(
+              const NavigationDestination(
                 icon: Icon(Icons.analytics_outlined),
                 label: 'Analysis',
               ),
               NavigationDestination(
+                icon: controller.realtimeRunning
+                    ? const Icon(Icons.radar, color: Colors.green)
+                    : const Icon(Icons.radar_outlined),
+                label: 'Monitor',
+              ),
+              const NavigationDestination(
                 icon: Icon(Icons.article_outlined),
                 label: 'Reports',
               ),
-              NavigationDestination(
+              const NavigationDestination(
                 icon: Icon(Icons.settings_outlined),
                 label: 'About',
               ),

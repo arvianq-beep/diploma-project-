@@ -1,13 +1,18 @@
 import 'dart:async';
 
 import 'package:diploma_application_ml/data/repositories/ids_repository.dart';
+import 'package:diploma_application_ml/domain/models/analysis_result.dart';
 import 'package:diploma_application_ml/domain/models/analyst_review.dart';
 import 'package:diploma_application_ml/domain/models/batch_analysis_summary.dart';
+import 'package:diploma_application_ml/domain/models/final_decision.dart';
 import 'package:diploma_application_ml/domain/models/final_decision_status.dart';
 import 'package:diploma_application_ml/domain/models/incident_case.dart';
 import 'package:diploma_application_ml/domain/models/ml_model_info.dart';
+import 'package:diploma_application_ml/domain/models/realtime_event.dart';
 import 'package:diploma_application_ml/domain/models/report_model.dart';
 import 'package:diploma_application_ml/domain/models/threat_event.dart';
+import 'package:diploma_application_ml/domain/models/verification_check.dart';
+import 'package:diploma_application_ml/domain/models/verification_result.dart';
 import 'package:flutter/foundation.dart';
 
 enum AnalysisPhase { idle, rawAiRunning, verificationRunning, ready }
@@ -34,6 +39,14 @@ class AppController extends ChangeNotifier {
   MlModelInfo _modelInfo = MlModelInfo.fallback();
   BatchAnalysisSummary? _lastBatchSummary;
 
+  // Real-time monitoring state
+  bool _realtimeRunning = false;
+  String _realtimeSource = 'synthetic';
+  final List<RealtimeEvent> _realtimeEvents = [];
+  int _realtimeThreatCount = 0;
+  int _realtimeBenignCount = 0;
+  Timer? _realtimePoller;
+
   int get tabIndex => _tabIndex;
   bool get initializing => _initializing;
   bool get isAnalyzing => _isAnalyzing;
@@ -50,6 +63,17 @@ class AppController extends ChangeNotifier {
   List<ThreatEvent> get sampleEvents => List.unmodifiable(_sampleEvents);
   MlModelInfo get modelInfo => _modelInfo;
   BatchAnalysisSummary? get lastBatchSummary => _lastBatchSummary;
+
+  // Real-time getters
+  bool get realtimeRunning => _realtimeRunning;
+  String get realtimeSource => _realtimeSource;
+  List<RealtimeEvent> get realtimeEvents => List.unmodifiable(_realtimeEvents);
+  int get realtimeThreatCount => _realtimeThreatCount;
+  int get realtimeBenignCount => _realtimeBenignCount;
+
+  Future<List<({String value, String label})>> fetchRealtimeInterfaces(
+    String source,
+  ) => _repository.fetchRealtimeInterfaces(source);
 
   void initialize() {
     _sampleEvents = _repository.getSampleEvents();
@@ -234,6 +258,204 @@ class AppController extends ChangeNotifier {
   void clearError() {
     _error = null;
     notifyListeners();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Real-time monitoring
+  // ---------------------------------------------------------------------------
+
+  Future<void> startRealtime({
+    String source = 'synthetic',
+    int batchSize = 32,
+    String? interface,
+  }) async {
+    if (_realtimeRunning) return;
+    _error = null;
+    _realtimeSource = source;
+    _realtimeEvents.clear();
+    _realtimeThreatCount = 0;
+    _realtimeBenignCount = 0;
+    notifyListeners();
+
+    try {
+      await _repository.startRealtime(
+        source: source,
+        batchSize: batchSize,
+        interface: interface,
+      );
+      _realtimeRunning = true;
+      // Poll for new results every second
+      _realtimePoller = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _pollRealtimeResults(),
+      );
+      notifyListeners();
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+    }
+  }
+
+  Future<void> stopRealtime() async {
+    _realtimePoller?.cancel();
+    _realtimePoller = null;
+    try {
+      await _repository.stopRealtime();
+    } catch (_) {}
+    _realtimeRunning = false;
+    notifyListeners();
+  }
+
+  Future<void> _pollRealtimeResults() async {
+    try {
+      final (:events, :running) = await _repository.pollRealtimeResults();
+      if (events.isNotEmpty) {
+        _realtimeEvents.insertAll(0, events);
+        if (_realtimeEvents.length > 500) {
+          _realtimeEvents.removeRange(500, _realtimeEvents.length);
+        }
+        for (final e in events) {
+          if (e.isThreat) {
+            _realtimeThreatCount++;
+          } else {
+            _realtimeBenignCount++;
+          }
+          // Convert to IncidentCase so Dashboard/Analysis/Reports update automatically
+          final incident = _realtimeEventToIncident(e);
+          _history.insert(0, incident);
+          _latestIncident = incident;
+          _reports.insert(0, _repository.buildReport(incident));
+        }
+        notifyListeners();
+      }
+      if (_realtimeRunning != running) {
+        _realtimeRunning = running;
+        if (!running) {
+          _realtimePoller?.cancel();
+          _realtimePoller = null;
+        }
+        notifyListeners();
+      }
+    } catch (_) {
+      // Silently ignore poll errors — backend may be temporarily unreachable
+    }
+  }
+
+  /// Convert a lean RealtimeEvent into a full IncidentCase so it feeds
+  /// Dashboard charts, Analysis latest result, and Reports list.
+  IncidentCase _realtimeEventToIncident(RealtimeEvent e) {
+    final status = switch (e.finalStatus) {
+      'Verified Threat' => FinalDecisionStatus.verifiedThreat,
+      'Suspicious'      => FinalDecisionStatus.suspicious,
+      _                 => FinalDecisionStatus.benign,
+    };
+
+    final proto = switch (e.proto) {
+      6  => 'TCP',
+      17 => 'UDP',
+      1  => 'ICMP',
+      _  => 'PROTO/${e.proto}',
+    };
+
+    final event = ThreatEvent(
+      id: 'rt-${e.processedAt.millisecondsSinceEpoch}',
+      title: '[RT] ${e.srcIp}:${e.srcPort} → ${e.dstIp}:${e.dstPort}',
+      description:
+          'Real-time flow: $proto  |  status: ${e.finalStatus}  |  '
+          'det: ${e.detectorLabel} (${(e.detectorConfidence * 100).toStringAsFixed(0)}%)',
+      sourceIp: e.srcIp,
+      destinationIp: e.dstIp,
+      sourcePort: e.srcPort,
+      destinationPort: e.dstPort,
+      protocol: proto,
+      bytesTransferredKb: 0,
+      durationSeconds: 0,
+      packetsPerSecond: 0,
+      failedLogins: 0,
+      anomalyScore: e.detectorConfidence,
+      contextRiskScore: e.verificationConfidence,
+      knownBadSource: false,
+      offHoursActivity: false,
+      repeatedAttempts: false,
+      sampleSource: 'realtime',
+      capturedAt: e.processedAt,
+      tags: ['realtime', e.finalStatus.toLowerCase().replaceAll(' ', '-')],
+    );
+
+    final analysis = AnalysisResult(
+      rawAiLabel: e.detectorLabel,
+      rawConfidence: e.detectorConfidence,
+      stabilityScore: e.detectorStability,
+      modelVersion: 'rf-flow-77 (realtime)',
+      reasoning: e.triggeredIndicators.isEmpty
+          ? 'No specific indicators triggered.'
+          : 'Triggered: ${e.triggeredIndicators.join(', ')}.',
+      alternativeHypothesis: e.detectorLabel == 'Benign'
+          ? 'Could be low-volume attack below detection threshold.'
+          : 'Could be legitimate high-rate background traffic.',
+      triggeredIndicators: e.triggeredIndicators,
+    );
+
+    final checks = e.verificationChecks.map((raw) {
+      return VerificationCheck(
+        key: (raw['key'] ?? '').toString(),
+        title: (raw['title'] ?? '').toString(),
+        description: (raw['description'] ?? '').toString(),
+        passed: raw['passed'] == true,
+        score: (raw['score'] as num?)?.toDouble() ?? 0.0,
+        weight: (raw['weight'] as num?)?.toDouble() ?? 0.0,
+        evidence: ((raw['evidence'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+      );
+    }).toList();
+
+    final verification = VerificationResult(
+      checks: checks,
+      passed: e.isVerifiedThreat,
+      verificationScore: e.verificationConfidence,
+      explanationNotes: [
+        'Two-stage pipeline: RF detector + MLP verifier.',
+        'Verifier model: verifier-tabular-mlp (realtime)',
+      ],
+      summary: e.verificationSummary.isNotEmpty
+          ? e.verificationSummary
+          : '${e.finalStatus}: ${e.recommendedAction}',
+    );
+
+    final finalDecision = FinalDecision(
+      rawAiLabel: e.detectorLabel,
+      rawConfidence: e.detectorConfidence,
+      verificationChecks: const [],
+      status: status,
+      explanation:
+          'Realtime flow classified as ${e.finalStatus}. '
+          'Detector confidence ${(e.detectorConfidence * 100).toStringAsFixed(0)}%, '
+          'verifier confidence ${(e.verificationConfidence * 100).toStringAsFixed(0)}%.',
+      timestamp: e.processedAt,
+      recommendedAnalystAction: e.recommendedAction,
+    );
+
+    return IncidentCase(
+      event: event,
+      analysis: analysis,
+      verification: verification,
+      finalDecision: finalDecision,
+      analystReview: AnalystReview(
+        state: status == FinalDecisionStatus.suspicious
+            ? AnalystReviewState.pending
+            : AnalystReviewState.reviewed,
+        analystName: 'Realtime Monitor',
+        notes: '',
+        updatedAt: e.processedAt,
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _realtimePoller?.cancel();
+    super.dispose();
   }
 
   Map<FinalDecisionStatus, int> get statusCounts {

@@ -5,9 +5,8 @@ in order of preference; any source can be used independently.
 
 Source classes
 --------------
-PysharkCapture    — live capture via pyshark (requires tshark installed)
-ScapyCapture      — live capture via scapy  (requires libpcap / Npcap)
-CsvReplaySource   — replay a CICFlowMeter-style CSV as if flows arrived live
+PysharkCapture      — live capture via pyshark (requires tshark installed)
+ScapyCapture        — live capture via scapy  (requires libpcap / Npcap)
 SyntheticFlowSource — generates random synthetic flows (testing / demo)
 
 All imports of pyshark and scapy are deferred inside __init__ so that the
@@ -16,8 +15,6 @@ module can be imported on machines that have neither library installed.
 
 from __future__ import annotations
 
-import csv
-import math
 import random
 import time
 from abc import ABC, abstractmethod
@@ -75,6 +72,16 @@ class PysharkCapture(BaseCapture):
         self.timeout = timeout
 
     def packets(self) -> Iterator[RawPacket]:
+        import asyncio
+
+        # Python 3.10+ no longer auto-creates an event loop in non-main threads.
+        # pyshark calls asyncio.get_event_loop() during LiveCapture.__init__,
+        # which raises RuntimeError when called from a worker thread with no loop.
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
         capture = self._pyshark.LiveCapture(
             interface=self.interface,
             bpf_filter=self.bpf_filter,
@@ -237,119 +244,6 @@ class ScapyCapture(BaseCapture):
 
 
 # ---------------------------------------------------------------------------
-# CsvReplaySource
-# ---------------------------------------------------------------------------
-class CsvReplaySource(BaseCapture):
-    """Replay a CICFlowMeter-style CSV as a stream of synthetic RawPackets.
-
-    The CSV is expected to contain at least the canonical 77 feature columns.
-    Each row is emitted as a single synthetic "packet" whose fields are
-    back-calculated from the flow statistics where possible, so that the
-    FlowAggregator sees it as a complete 1-packet flow.
-
-    This is a fallback / compatibility mode — no real packets are captured.
-
-    Parameters
-    ----------
-    csv_path : str
-        Path to the CSV file.
-    rate_limit : float
-        Seconds to sleep between rows (0 = as fast as possible).
-    loop : bool
-        If True, restart from the beginning when the file is exhausted.
-    """
-
-    def __init__(
-        self,
-        csv_path: str,
-        rate_limit: float = 0.0,
-        loop: bool = False,
-    ) -> None:
-        self.csv_path = csv_path
-        self.rate_limit = rate_limit
-        self.loop = loop
-
-    def packets(self) -> Iterator[RawPacket]:
-        while True:
-            with open(self.csv_path, newline="", encoding="utf-8", errors="replace") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    pkt = self._row_to_packet(row)
-                    if pkt is not None:
-                        yield pkt
-                    if self.rate_limit > 0:
-                        time.sleep(self.rate_limit)
-            if not self.loop:
-                break
-
-    @staticmethod
-    def _row_to_packet(row: dict[str, str]) -> RawPacket | None:
-        """Convert a CSV row into a minimal RawPacket representing the flow."""
-
-        def _f(key: str, default: float = 0.0) -> float:
-            for k in (key, key.strip(), key.lower().replace(" ", "_")):
-                if k in row:
-                    try:
-                        return float(row[k])
-                    except (ValueError, TypeError):
-                        return default
-            return default
-
-        def _try_keys(*keys: str, default: float = 0.0) -> float:
-            for k in keys:
-                val = row.get(k) or row.get(k.strip())
-                if val is not None:
-                    try:
-                        return float(val)
-                    except (ValueError, TypeError):
-                        pass
-            return default
-
-        try:
-            dst_port = int(_try_keys("Destination Port", "destination_port", "Dst Port"))
-            fwd_packets = _try_keys("Total Fwd Packets", "total_fwd_packets", "Tot Fwd Pkts")
-            bwd_packets = _try_keys("Total Backward Packets", "total_bwd_packets", "Tot Bwd Pkts")
-            fwd_bytes = _try_keys("Total Length of Fwd Packets", "total_length_fwd_packets", "TotLen Fwd Pkts")
-            duration_s = _try_keys("Flow Duration", "flow_duration")
-
-            # Estimate total packet length
-            total_len = max(int(fwd_bytes / max(fwd_packets, 1)), 40)
-
-            # Estimate TCP flags from label or flag count columns
-            syn = int(_try_keys("SYN Flag Count", "syn_flag_count"))
-            fin = int(_try_keys("FIN Flag Count", "fin_flag_count"))
-            rst = int(_try_keys("RST Flag Count", "rst_flag_count"))
-            ack = int(_try_keys("ACK Flag Count", "ack_flag_count"))
-            flags = (
-                (0x02 if syn else 0) |
-                (0x01 if fin else 0) |
-                (0x04 if rst else 0) |
-                (0x10 if ack else 0)
-            )
-
-            init_win = int(_try_keys("Init_Win_bytes_forward", "init_win_bytes_forward"))
-
-            # Use a fake monotone timestamp
-            ts = time.time()
-
-            return RawPacket(
-                timestamp=ts,
-                src_ip="0.0.0.0",
-                dst_ip="0.0.0.0",
-                src_port=0,
-                dst_port=dst_port,
-                proto=6,           # assume TCP
-                length=total_len,
-                payload_length=max(total_len - 20, 0),
-                ip_header_length=20,
-                tcp_flags=flags | 0x01,   # ensure FIN so flow completes immediately
-                tcp_window=init_win,
-            )
-        except Exception:
-            return None
-
-
-# ---------------------------------------------------------------------------
 # SyntheticFlowSource
 # ---------------------------------------------------------------------------
 _ATTACK_PORTS = [22, 23, 80, 443, 3389, 8080, 21, 25]
@@ -447,7 +341,6 @@ def make_capture_source(
     source: str,
     *,
     interface: str = "eth0",
-    csv_path: str | None = None,
     rate_limit: float = 0.0,
     attack_ratio: float = 0.3,
     seed: int | None = None,
@@ -457,13 +350,11 @@ def make_capture_source(
     Parameters
     ----------
     source : str
-        One of "pyshark", "scapy", "csv", "synthetic".
+        One of "pyshark", "scapy", "synthetic".
     interface : str
         Network interface (pyshark / scapy only).
-    csv_path : str | None
-        CSV file path (csv source only).
     rate_limit : float
-        Seconds between packets (csv / synthetic only).
+        Seconds between packets (synthetic only).
     attack_ratio : float
         Fraction of attacks in synthetic mode.
     seed : int | None
@@ -473,13 +364,9 @@ def make_capture_source(
         return PysharkCapture(interface=interface)
     if source == "scapy":
         return ScapyCapture(interface=interface)
-    if source == "csv":
-        if not csv_path:
-            raise ValueError("csv_path must be provided when source='csv'")
-        return CsvReplaySource(csv_path, rate_limit=rate_limit)
     if source == "synthetic":
         return SyntheticFlowSource(rate_limit=rate_limit, attack_ratio=attack_ratio, seed=seed)
     raise ValueError(
         f"Unknown capture source {source!r}. "
-        "Choose from: 'pyshark', 'scapy', 'csv', 'synthetic'."
+        "Choose from: 'pyshark', 'scapy', 'synthetic'."
     )

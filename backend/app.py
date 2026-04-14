@@ -98,6 +98,146 @@ def upload_dataset():
         "preview_rows": len(preview_df)
     }), 201
 
+# ---------------------------------------------------------------------------
+# Real-time endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/realtime/start")
+def realtime_start():
+    """Start real-time traffic monitoring.
+
+    Body (JSON, all optional):
+        source        — "synthetic" | "csv" | "pyshark" | "scapy"  (default: "synthetic")
+        interface     — network interface for pyshark/scapy          (default: "eth0")
+        csv_path      — path to CSV for source="csv"
+        batch_size    — flows per inference batch                     (default: 32)
+        rate_limit    — seconds between packets for csv/synthetic     (default: 0.05)
+        attack_ratio  — synthetic attack fraction 0–1                 (default: 0.3)
+    """
+    with _monitor_lock:
+        monitor = _get_monitor()
+        if monitor is not None and monitor.is_running:
+            return jsonify({"error": "Monitor is already running. Stop it first."}), 409
+
+        body = request.get_json(silent=True) or {}
+        source = body.get("source", "synthetic")
+        interface = body.get("interface", "eth0")
+        csv_path = body.get("csv_path")
+        batch_size = int(body.get("batch_size", 32))
+        rate_limit = float(body.get("rate_limit", 0.05))
+        attack_ratio = float(body.get("attack_ratio", 0.3))
+
+        # Validate csv_path exists when source="csv"
+        if source == "csv":
+            if not csv_path:
+                return jsonify({"error": "csv_path is required when source='csv'"}), 400
+            if not os.path.isfile(csv_path):
+                return jsonify({"error": f"csv_path not found: {csv_path}"}), 400
+
+        try:
+            from realtime.pipeline import StreamMonitor
+            m = StreamMonitor(
+                source=source,
+                interface=interface,
+                csv_path=csv_path,
+                rate_limit=rate_limit,
+                attack_ratio=attack_ratio,
+                batch_size=batch_size,
+                console_output=True,
+            )
+            _set_monitor(m)
+            # Start in non-blocking mode so the HTTP request returns immediately
+            t = threading.Thread(target=m.start, kwargs={"blocking": True}, daemon=True)
+            t.start()
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    return jsonify({
+        "status": "started",
+        "source": source,
+        "batch_size": batch_size,
+    }), 200
+
+
+@app.post("/api/realtime/stop")
+def realtime_stop():
+    """Stop the running real-time monitor."""
+    with _monitor_lock:
+        monitor = _get_monitor()
+        if monitor is None or not monitor.is_running:
+            return jsonify({"error": "No monitor is currently running."}), 409
+        monitor.stop()
+        _set_monitor(None)
+    return jsonify({"status": "stopped"}), 200
+
+
+@app.get("/api/realtime/status")
+def realtime_status():
+    """Return current monitor status and buffer size."""
+    monitor = _get_monitor()
+    if monitor is None:
+        return jsonify({"running": False, "buffer_size": 0}), 200
+    return jsonify(monitor.status()), 200
+
+
+@app.get("/api/realtime/results")
+def realtime_results():
+    """Return and clear all buffered StreamResult objects as JSON.
+
+    Used by Flutter for periodic polling (every ~1 s).
+    Returns:
+        {"results": [...], "running": bool}
+    """
+    monitor = _get_monitor()
+    if monitor is None:
+        return jsonify({"results": [], "running": False}), 200
+    items = monitor.drain_results()
+    return jsonify({
+        "results": [r.to_sse_dict() for r in items],
+        "running": monitor.is_running,
+    }), 200
+
+
+@app.get("/api/realtime/stream")
+def realtime_stream():
+    """Server-Sent Events stream of StreamResult objects.
+
+    Each SSE event has the form:
+        data: <JSON>\\n\\n
+
+    The client should connect with:
+        const es = new EventSource('/api/realtime/stream');
+        es.onmessage = e => console.log(JSON.parse(e.data));
+
+    The stream sends a heartbeat comment every 15 s to keep the connection
+    alive through proxies that close idle connections.
+    """
+    def _generate():
+        last_hb = time.time()
+        while True:
+            monitor = _get_monitor()
+            if monitor is not None:
+                for result in monitor.drain_results():
+                    payload = json.dumps(result.to_sse_dict())
+                    yield f"data: {payload}\n\n"
+
+            now = time.time()
+            if now - last_hb >= 15:
+                yield ": heartbeat\n\n"
+                last_hb = now
+
+            time.sleep(0.2)
+
+    return Response(
+        stream_with_context(_generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 if __name__ == "__main__":
     print(app.url_map)  # временно для проверки маршрутов
-    app.run(host="127.0.0.1", port=5001, debug=True)
+    app.run(host="127.0.0.1", port=5001, debug=True, threaded=True)
