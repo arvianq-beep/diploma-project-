@@ -1,16 +1,26 @@
 {
-  "model_name": "Secure Decision Verification MLP",
-  "model_version": "verifier-tabular-mlp-v1",
+  "model_name": "Secure Decision Verification Ensemble MLP",
+  "model_version": "verifier-ensemble-mlp-v2",
   "architecture": {
-    "type": "mlp",
+    "type": "ensemble_mlp",
+    "ensemble_size": 3,
     "hidden_layers": [
-      48,
-      24
+      128,
+      64,
+      32
     ],
-    "dropout": 0.12,
-    "activation": "relu"
+    "dropout": [
+      0.2,
+      0.15,
+      0.1
+    ],
+    "batch_norm": true,
+    "activation": "relu",
+    "calibration": "platt_scaling"
   },
-  "threshold": 0.58,
+  "threshold": 0.9,
+  "threat_threshold": 0.3,
+  "benign_threshold": 0.9,
   "input_features": [
     "duration_seconds_norm",
     "bytes_transferred_kb_log",
@@ -40,15 +50,21 @@
     "label_consistency_ratio",
     "context_consistency_score",
     "cross_evidence_score",
-    "support_alignment_score"
+    "support_alignment_score",
+    "indicator_risky_port",
+    "indicator_failed_logins_high",
+    "indicator_high_pps",
+    "indicator_high_bytes"
   ],
   "training_sources": [
-    "bootstrap_synthetic"
+    "cic_ids2017_held_out",
+    "unsw_nb15_augmented"
   ],
+  "detector_training_mode": "trained-detector-artifact",
   "label_generation": {
-    "description": "Because the repository does not include human-labelled verification targets, the verifier is trained on pseudo-labels: a sample is marked verified only when the Stage 1 detector prediction matches ground truth and is simultaneously stable, confident, and context-supported.",
-    "attack_rule": "verified = detector correct AND confidence >= 0.62 AND stability >= 0.58 AND label_consistency >= 0.74 AND confidence_drop <= 0.18 AND context_score >= 0.48 AND cross_evidence_score >= 0.54 AND support_alignment_score >= 0.56",
-    "benign_rule": "verified = detector correct AND confidence >= 0.56 AND stability >= 0.58 AND label_consistency >= 0.74 AND confidence_drop <= 0.18 AND context_score >= 0.52 AND cross_evidence_score <= 0.46 AND support_alignment_score >= 0.54"
+    "description": "Pseudo-labels based on ground-truth correctness and perturbation stability only. Computed scores excluded from label criteria to prevent circular reasoning. CIC-IDS2017 uses only the held-out 20% split (test_size=0.2, random_state=42). UNSW-NB15 is used in full (never used in Stage 1 training).",
+    "attack_rule": "verified = detector correct AND confidence >= 0.62 AND stability >= 0.58 AND label_consistency >= 0.74 AND confidence_drop <= 0.18",
+    "benign_rule": "verified = detector correct AND confidence >= 0.56 AND stability >= 0.58 AND label_consistency >= 0.74 AND confidence_drop <= 0.18"
   },
   "seed": 42
 }

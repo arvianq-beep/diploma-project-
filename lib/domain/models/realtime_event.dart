@@ -16,6 +16,7 @@ class RealtimeEvent {
     required this.triggeredIndicators,
     required this.verificationChecks,
     required this.verificationSummary,
+    this.reportId,
   });
 
   final DateTime processedAt;
@@ -34,6 +35,7 @@ class RealtimeEvent {
   /// Raw JSON dicts for each of the 5 verification checks from Stage 2.
   final List<Map<String, dynamic>> verificationChecks;
   final String verificationSummary;
+  final int? reportId;
 
   bool get isThreat => detectorLabel != 'Benign';
   bool get isVerifiedThreat => finalStatus == 'Verified Threat';
@@ -69,6 +71,7 @@ class RealtimeEvent {
               .toList(),
       verificationSummary:
           (json['verification_summary'] ?? '').toString(),
+      reportId: (json['report_id'] as num?)?.toInt(),
     );
   }
 }

@@ -45,7 +45,7 @@ class SecureDecisionVerificationService:
     def model_version(self) -> str:
         if self.bundle is None:
             return "verifier-heuristic-fallback"
-        return str(self.bundle.metadata.get("model_version", "verifier-tabular-mlp-v1"))
+        return str(self.bundle.metadata.get("model_version", "verifier-ensemble-mlp-v2"))
 
     @property
     def metadata(self) -> dict[str, Any]:
@@ -64,12 +64,16 @@ class SecureDecisionVerificationService:
             detector_output=detector_output,
         )
         probability = self._predict_probability(features.feature_map, features.vector)
-        is_verified = probability >= self._threshold
-        final_status = self._final_status(
-            detector_output=detector_output,
-            verification_confidence=probability,
-            feature_bundle=features,
+        uncertainty = self._estimate_uncertainty(features.vector)
+        importance = self._compute_feature_importance(features.vector)
+
+        final_status = self._decide_status(
+            is_threat=detector_output.label != "Benign",
+            probability=probability,
+            uncertainty=uncertainty,
         )
+        is_verified = final_status != SUSPICIOUS_STATUS
+
         detector_details = {
             "reasoning": detector_output.reasoning,
             "alternative_hypothesis": detector_output.alternative_hypothesis,
@@ -80,10 +84,12 @@ class SecureDecisionVerificationService:
         verification_details = self._verification_details(
             event=event,
             detector_output=detector_output,
-            verification_confidence=probability,
+            probability=probability,
             is_verified=is_verified,
             final_status=final_status,
             feature_bundle=features,
+            uncertainty=uncertainty,
+            importance=importance,
         )
 
         return VerificationDecision(
@@ -107,106 +113,233 @@ class SecureDecisionVerificationService:
             },
         )
 
+    # ── core decision: pure model, no rule-based gates ────────────────────────
+
+    def _decide_status(
+        self,
+        *,
+        is_threat: bool,
+        probability: float,
+        uncertainty: dict[str, float],
+    ) -> str:
+        """Status is determined solely by the ensemble MLP + MC uncertainty.
+
+        Rule-based gates removed: the trained model already learned these
+        boundaries from data. Separate thresholds for threat vs benign allow
+        independent optimisation via Youden's J on each decision direction.
+        """
+        if uncertainty.get("uncertain", False):
+            return SUSPICIOUS_STATUS
+
+        threshold = self._threat_threshold if is_threat else self._benign_threshold
+        if probability >= threshold:
+            return VERIFIED_THREAT_STATUS if is_threat else BENIGN_STATUS
+        return SUSPICIOUS_STATUS
+
+    # ── threshold properties ──────────────────────────────────────────────────
+
     @property
     def _threshold(self) -> float:
-        if self.bundle is None:
-            return 0.58
-        return float(self.bundle.threshold)
+        return float(self.bundle.threshold) if self.bundle else 0.50
+
+    @property
+    def _threat_threshold(self) -> float:
+        return float(self.bundle.threat_threshold) if self.bundle else self._threshold
+
+    @property
+    def _benign_threshold(self) -> float:
+        return float(self.bundle.benign_threshold) if self.bundle else self._threshold
+
+    # ── prediction helpers ────────────────────────────────────────────────────
 
     def _predict_probability(self, feature_map: dict[str, float], vector: list[float]) -> float:
         if self.bundle is not None:
             return self.bundle.predict_probability(vector)
 
+        # Heuristic fallback when model artifact is absent.
         stability_proxy = 1.0 - min(feature_map["perturbation_confidence_drop"] * 2.0, 1.0)
-        probability = (
-            feature_map["detector_confidence"] * 0.24
-            + feature_map["detector_stability_score"] * 0.16
-            + feature_map["context_consistency_score"] * 0.18
-            + feature_map["cross_evidence_score"] * 0.18
-            + feature_map["label_consistency_ratio"] * 0.16
-            + stability_proxy * 0.08
-        )
-        if feature_map["detector_is_threat"] < 0.5:
-            probability = (
-                feature_map["detector_confidence"] * 0.30
-                + feature_map["context_consistency_score"] * 0.20
-                + (1.0 - feature_map["cross_evidence_score"]) * 0.18
-                + feature_map["label_consistency_ratio"] * 0.18
-                + stability_proxy * 0.14
-            )
-        return float(max(0.0, min(1.0, probability)))
+        if feature_map["detector_is_threat"] >= 0.5:
+            return float(max(0.0, min(1.0,
+                feature_map["detector_confidence"] * 0.24
+                + feature_map["detector_stability_score"] * 0.16
+                + feature_map["context_consistency_score"] * 0.18
+                + feature_map["cross_evidence_score"] * 0.18
+                + feature_map["label_consistency_ratio"] * 0.16
+                + stability_proxy * 0.08
+            )))
+        return float(max(0.0, min(1.0,
+            feature_map["detector_confidence"] * 0.30
+            + feature_map["context_consistency_score"] * 0.20
+            + (1.0 - feature_map["cross_evidence_score"]) * 0.18
+            + feature_map["label_consistency_ratio"] * 0.18
+            + stability_proxy * 0.14
+        )))
 
-    def _final_status(
-        self,
-        *,
-        detector_output: PredictionOutput,
-        verification_confidence: float,
-        feature_bundle,
-    ) -> str:
-        unstable = (
-            detector_output.stability_score < 0.55
-            or feature_bundle.perturbation.label_consistency_ratio < 0.72
-            or feature_bundle.perturbation.confidence_drop > 0.18
-            or feature_bundle.perturbation.variance > 0.09
-        )
+    def _estimate_uncertainty(self, vector: list[float]) -> dict[str, float]:
+        if self.bundle is None:
+            return {"mean": 0.5, "std": 0.0, "min": 0.5, "max": 0.5, "uncertain": False}
+        return self.bundle.predict_with_uncertainty(vector, n_samples=30)
 
-        if detector_output.label == "Benign":
-            benign_supported = (
-                verification_confidence >= self._threshold
-                and feature_bundle.context_consistency_score >= 0.52
-                and feature_bundle.cross_evidence_score <= 0.46
-                and feature_bundle.perturbation.label_consistency_ratio >= 0.78
-                and not unstable
-            )
-            return BENIGN_STATUS if benign_supported else SUSPICIOUS_STATUS
+    def _compute_feature_importance(self, vector: list[float]) -> dict[str, float]:
+        if self.bundle is None:
+            return {}
+        try:
+            return self.bundle.feature_importance(vector, steps=50)
+        except Exception:
+            return {}
 
-        threat_supported = (
-            verification_confidence >= max(self._threshold, 0.62)
-            and detector_output.confidence >= 0.60
-            and feature_bundle.context_consistency_score >= 0.48
-            and feature_bundle.cross_evidence_score >= 0.54
-            and feature_bundle.perturbation.label_consistency_ratio >= 0.72
-            and not unstable
-        )
-        return VERIFIED_THREAT_STATUS if threat_supported else SUSPICIOUS_STATUS
+    # ── response building ─────────────────────────────────────────────────────
 
     def _verification_details(
         self,
         *,
         event: dict[str, Any],
         detector_output: PredictionOutput,
-        verification_confidence: float,
+        probability: float,
         is_verified: bool,
         final_status: str,
         feature_bundle,
+        uncertainty: dict[str, float],
+        importance: dict[str, float],
     ) -> dict[str, Any]:
-        checks = self._build_checks(
-            detector_output=detector_output,
-            verification_confidence=verification_confidence,
-            feature_bundle=feature_bundle,
-        )
-        failed_titles = [check["title"] for check in checks if not check["passed"]]
+        is_threat = detector_output.label != "Benign"
+        threshold = self._threat_threshold if is_threat else self._benign_threshold
+
         if final_status == BENIGN_STATUS:
-            summary = "The backend verifier supports the benign interpretation, so the final operational status remains Benign."
+            summary = "Ensemble verifier confirms benign — probability above benign threshold with low uncertainty."
         elif final_status == VERIFIED_THREAT_STATUS:
-            summary = "The backend verifier confirms the detector threat output with stable, context-supported evidence, so the event is promoted to Verified Threat."
+            summary = "Ensemble verifier confirms threat — probability above threat threshold with low uncertainty."
         else:
-            failed_text = ", ".join(failed_titles) if failed_titles else "verification disagreement"
-            summary = (
-                f"The detector output was not confirmed strongly enough by the verifier. "
-                f"The event is marked Suspicious because of {failed_text}."
-            )
+            reason = "high model uncertainty" if uncertainty.get("uncertain") else "probability below threshold"
+            summary = f"Detector output not confirmed by ensemble verifier ({reason})."
+
+        top_features = list(importance.items())[:5] if importance else []
+
+        ensemble_members = len(self.bundle.models) if self.bundle else 0
+        label_consistency = feature_bundle.perturbation.label_consistency_ratio
+        confidence_drop = feature_bundle.perturbation.confidence_drop
+        std_confidence = feature_bundle.perturbation.std_confidence
+        pert_passed = label_consistency >= 0.74 and confidence_drop <= 0.18
+        alignment = feature_bundle.support_alignment_score
+        uncertainty_score = max(0.0, min(1.0, 1.0 - uncertainty.get("std", 0.0) * 5.0))
+        mc_samples = 30
+
+        checks = [
+            {
+                "key": "neural_ensemble",
+                "title": "Neural Ensemble Decision",
+                "description": (
+                    f"An ensemble of {ensemble_members} MLP models voted on the "
+                    "trustworthiness of the Stage-1 detector output. "
+                    "Score is the Platt-calibrated ensemble probability."
+                ),
+                "passed": probability >= threshold,
+                "score": round(probability, 4),
+                "weight": 0.35,
+                "evidence": [
+                    f"Probability: {round(probability, 4)}",
+                    f"Threshold ({'threat' if is_threat else 'benign'}): {round(threshold, 4)}",
+                    "Decision: above threshold → verified" if probability >= threshold
+                    else "Decision: below threshold → not verified",
+                ],
+            },
+            {
+                "key": "mc_uncertainty",
+                "title": "MC Dropout Uncertainty",
+                "description": (
+                    f"Monte Carlo dropout runs {mc_samples} forward passes with active "
+                    "dropout to estimate epistemic uncertainty. "
+                    "High std (> 0.12) routes to analyst review."
+                ),
+                "passed": not uncertainty.get("uncertain", False),
+                "score": round(uncertainty_score, 4),
+                "weight": 0.20,
+                "evidence": [
+                    f"Mean probability: {round(uncertainty.get('mean', probability), 4)}",
+                    f"Std deviation: {round(uncertainty.get('std', 0.0), 4)}",
+                    f"Uncertain: {'yes — routed to analyst' if uncertainty.get('uncertain') else 'no'}",
+                    f"MC passes: {mc_samples} × {ensemble_members} models",
+                ],
+            },
+            {
+                "key": "context_support",
+                "title": "Context & Evidence Support",
+                "description": (
+                    "Context consistency and cross-evidence scores measure how well "
+                    "event behavioral signals (port, failed logins, timing, repeated "
+                    "attempts) align with the detector verdict."
+                ),
+                "passed": alignment >= 0.50,
+                "score": round(alignment, 4),
+                "weight": 0.20,
+                "evidence": [
+                    f"Context consistency: {round(feature_bundle.context_consistency_score, 4)}",
+                    f"Cross-evidence score: {round(feature_bundle.cross_evidence_score, 4)}",
+                    f"Support alignment: {round(alignment, 4)}",
+                ],
+            },
+            {
+                "key": "perturbation_stability",
+                "title": "Perturbation Stability",
+                "description": (
+                    "The detector was re-run on 6 slightly modified flow variants "
+                    "(rate ±6%, duration ±8%, byte/packet balance shifts). "
+                    "High label consistency and low confidence drop confirm robustness."
+                ),
+                "passed": pert_passed,
+                "score": round(label_consistency, 4),
+                "weight": 0.15,
+                "evidence": [
+                    f"Label consistency: {round(label_consistency * 100):.0f}%",
+                    f"Confidence drop: {round(confidence_drop, 4)}",
+                    f"Confidence std across variants: {round(std_confidence, 4)}",
+                    "Stability: passed (consistency ≥ 74%, drop ≤ 0.18)"
+                    if pert_passed else "Stability: failed",
+                ],
+            },
+            {
+                "key": "feature_attribution",
+                "title": "Integrated Gradients Attribution",
+                "description": (
+                    "Integrated Gradients computes per-feature attributions against a "
+                    "background baseline, revealing which signals drove the verifier's decision."
+                ),
+                "passed": bool(top_features),
+                "score": 1.0 if top_features else 0.0,
+                "weight": 0.10,
+                "evidence": [
+                    f"{feat}: {'+' if attr >= 0 else ''}{round(attr, 4)}"
+                    for feat, attr in top_features
+                ],
+            },
+        ]
 
         return {
             "summary": summary,
             "checks": checks,
+            "model_decision": {
+                "probability": round(probability, 4),
+                "threshold_used": round(threshold, 4),
+                "threshold_type": "threat" if is_threat else "benign",
+                "above_threshold": probability >= threshold,
+            },
+            "uncertainty": {
+                "mean_probability": round(uncertainty.get("mean", probability), 4),
+                "std_deviation": round(uncertainty.get("std", 0.0), 4),
+                "is_uncertain": uncertainty.get("uncertain", False),
+                "mc_samples": 30,
+                "ensemble_members": len(self.bundle.models) if self.bundle else 0,
+            },
+            "feature_importance": {
+                "top_5": [{"feature": k, "attribution": v} for k, v in top_features],
+                "method": "integrated_gradients",
+            },
             "support_scores": {
                 "context_consistency_score": round(feature_bundle.context_consistency_score, 4),
                 "cross_evidence_score": round(feature_bundle.cross_evidence_score, 4),
                 "support_alignment_score": round(feature_bundle.support_alignment_score, 4),
             },
             "perturbation_analysis": asdict(feature_bundle.perturbation),
-            "threshold_used": round(self._threshold, 4),
             "event_context": {
                 "anomaly_score": round(float(event.get("anomaly_score", 0.0)), 4),
                 "context_risk_score": round(float(event.get("context_risk_score", 0.0)), 4),
@@ -214,86 +347,10 @@ class SecureDecisionVerificationService:
                 "off_hours_activity": bool(event.get("off_hours_activity")),
                 "repeated_attempts": bool(event.get("repeated_attempts")),
             },
-            "model_type": "tabular-mlp" if self.bundle is not None else "heuristic-fallback",
+            "model_type": "ensemble-tabular-mlp" if self.bundle is not None else "heuristic-fallback",
             "model_available": self.bundle is not None,
             "is_verified_by_model": is_verified,
         }
-
-    def _build_checks(
-        self,
-        *,
-        detector_output: PredictionOutput,
-        verification_confidence: float,
-        feature_bundle,
-    ) -> list[dict[str, Any]]:
-        perturbation = feature_bundle.perturbation
-        is_benign = detector_output.label == "Benign"
-        threat_evidence_pass = feature_bundle.cross_evidence_score <= 0.46 if is_benign else feature_bundle.cross_evidence_score >= 0.54
-
-        return [
-            {
-                "key": "verification_model",
-                "title": "Neural verifier confidence",
-                "description": "Stage 2 MLP confidence that the detector output is trustworthy enough for operational use.",
-                "passed": verification_confidence >= self._threshold,
-                "score": round(verification_confidence, 4),
-                "weight": 0.30,
-                "evidence": [
-                    f"Verifier confidence: {verification_confidence:.2f}",
-                    f"Decision threshold: {self._threshold:.2f}",
-                    f"Verifier model version: {self.model_version}",
-                ],
-            },
-            {
-                "key": "detector_stability",
-                "title": "Detector stability under perturbation",
-                "description": "Checks whether Stage 1 remains stable when nearby numeric features are perturbed.",
-                "passed": detector_output.stability_score >= 0.55 and perturbation.label_consistency_ratio >= 0.72 and perturbation.confidence_drop <= 0.18,
-                "score": round((detector_output.stability_score + perturbation.label_consistency_ratio + (1.0 - min(perturbation.confidence_drop, 1.0))) / 3.0, 4),
-                "weight": 0.24,
-                "evidence": [
-                    f"Detector stability score: {detector_output.stability_score:.2f}",
-                    f"Label consistency ratio: {perturbation.label_consistency_ratio:.2f}",
-                    f"Confidence drop under perturbation: {perturbation.confidence_drop:.2f}",
-                ],
-            },
-            {
-                "key": "context_consistency",
-                "title": "Context consistency support",
-                "description": "Measures whether anomaly/context evidence supports the detector interpretation.",
-                "passed": feature_bundle.context_consistency_score >= 0.52 if is_benign else feature_bundle.context_consistency_score >= 0.48,
-                "score": round(feature_bundle.context_consistency_score, 4),
-                "weight": 0.18,
-                "evidence": [
-                    f"Context consistency score: {feature_bundle.context_consistency_score:.2f}",
-                    "Benign decisions require low contextual risk; threat decisions require supportive anomaly and context signals.",
-                ],
-            },
-            {
-                "key": "cross_evidence",
-                "title": "Cross-evidence support",
-                "description": "Combines deterministic evidence such as risky ports, failed logins, known-bad context, and triggered indicators.",
-                "passed": threat_evidence_pass,
-                "score": round(1.0 - feature_bundle.cross_evidence_score if is_benign else feature_bundle.cross_evidence_score, 4),
-                "weight": 0.16,
-                "evidence": [
-                    f"Cross-evidence score: {feature_bundle.cross_evidence_score:.2f}",
-                    "Threat detections require high cross-evidence support; benign detections require low threat evidence.",
-                ],
-            },
-            {
-                "key": "support_alignment",
-                "title": "Overall support alignment",
-                "description": "Summarizes whether detector confidence, context, and perturbation evidence point in the same direction.",
-                "passed": feature_bundle.support_alignment_score >= 0.55,
-                "score": round(feature_bundle.support_alignment_score, 4),
-                "weight": 0.12,
-                "evidence": [
-                    f"Support alignment score: {feature_bundle.support_alignment_score:.2f}",
-                    f"Triggered indicators: {len(detector_output.triggered_indicators)}",
-                ],
-            },
-        ]
 
     @staticmethod
     def _event_snapshot(event: dict[str, Any]) -> dict[str, Any]:

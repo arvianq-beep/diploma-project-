@@ -198,4 +198,16 @@ class IdsRepository {
       state: state,
     );
   }
+
+  Future<void> submitAnalystFeedback({
+    required int reportId,
+    required String verdict,
+    String? notes,
+  }) {
+    return _apiService.submitAnalystFeedback(
+      reportId: reportId,
+      verdict: verdict,
+      notes: notes,
+    );
+  }
 }

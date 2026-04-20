@@ -166,6 +166,7 @@ class AnalysisScreen extends StatelessWidget {
                                 builder: (_) => EventDetailsScreen(
                                   controller: controller,
                                   incident: reviewIncident,
+                                  repository: controller.repository,
                                 ),
                               ),
                             );
@@ -180,6 +181,7 @@ class AnalysisScreen extends StatelessWidget {
                                 builder: (_) => EventDetailsScreen(
                                   controller: controller,
                                   incident: incident,
+                                  repository: controller.repository,
                                 ),
                               ),
                             );

@@ -1,4 +1,5 @@
 import 'package:diploma_application_ml/core/utils/formatters.dart';
+import 'package:diploma_application_ml/data/repositories/ids_repository.dart';
 import 'package:diploma_application_ml/domain/models/incident_case.dart';
 import 'package:diploma_application_ml/features/home/app_controller.dart';
 import 'package:diploma_application_ml/shared/widgets/section_card.dart';
@@ -6,35 +7,107 @@ import 'package:diploma_application_ml/shared/widgets/status_badge.dart';
 import 'package:diploma_application_ml/shared/widgets/verification_check_tile.dart';
 import 'package:flutter/material.dart';
 
+// Allowed verdicts with their display labels, icons, and colors.
+const _verdicts = [
+  _VerdictOption(
+    value: 'confirmed_threat',
+    label: 'Confirmed Threat',
+    description: 'This is a real attack — detector was correct.',
+    icon: Icons.gpp_bad_outlined,
+    color: Color(0xFFDC2626),
+  ),
+  _VerdictOption(
+    value: 'confirmed_benign',
+    label: 'Confirmed Benign',
+    description: 'This is normal traffic — detector was correct.',
+    icon: Icons.verified_outlined,
+    color: Color(0xFF16A34A),
+  ),
+  _VerdictOption(
+    value: 'false_positive',
+    label: 'False Positive',
+    description: 'Flagged as threat but it\'s actually benign.',
+    icon: Icons.remove_circle_outline,
+    color: Color(0xFFD97706),
+  ),
+  _VerdictOption(
+    value: 'false_negative',
+    label: 'False Negative',
+    description: 'Missed a real attack — marked as benign.',
+    icon: Icons.warning_amber_outlined,
+    color: Color(0xFF7C3AED),
+  ),
+];
+
 class EventDetailsScreen extends StatefulWidget {
   const EventDetailsScreen({
     super.key,
     required this.controller,
     required this.incident,
+    required this.repository,
   });
 
   final AppController controller;
   final IncidentCase incident;
+  final IdsRepository repository;
 
   @override
   State<EventDetailsScreen> createState() => _EventDetailsScreenState();
 }
 
 class _EventDetailsScreenState extends State<EventDetailsScreen> {
-  late final TextEditingController analystController;
+  late final TextEditingController _notesController;
+  String? _selectedVerdict;
+  bool _feedbackSubmitting = false;
+  bool _feedbackSubmitted = false;
 
   @override
   void initState() {
     super.initState();
-    analystController = TextEditingController(
+    _notesController = TextEditingController(
       text: widget.incident.analystReview.notes,
     );
   }
 
   @override
   void dispose() {
-    analystController.dispose();
+    _notesController.dispose();
     super.dispose();
+  }
+
+  Future<void> _submitFeedback() async {
+    final reportId = widget.incident.reportId;
+    if (reportId == null) {
+      _showSnack('No report ID — this incident was not saved to the database.');
+      return;
+    }
+    if (_selectedVerdict == null) {
+      _showSnack('Select a verdict before submitting.');
+      return;
+    }
+    setState(() => _feedbackSubmitting = true);
+    try {
+      await widget.repository.submitAnalystFeedback(
+        reportId: reportId,
+        verdict: _selectedVerdict!,
+        notes: _notesController.text.trim().isEmpty
+            ? null
+            : _notesController.text.trim(),
+      );
+      setState(() => _feedbackSubmitted = true);
+      _showSnack('Analyst verdict saved — will be used for model fine-tuning.');
+    } catch (e) {
+      _showSnack('Failed to submit verdict: $e');
+    } finally {
+      setState(() => _feedbackSubmitting = false);
+    }
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   @override
@@ -50,6 +123,7 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
+          // ── Event metadata ─────────────────────────────────────────────────
           SectionCard(
             title: incident.event.title,
             subtitle: incident.event.description,
@@ -59,19 +133,12 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
               runSpacing: 12,
               children: [
                 _MetaChip(label: 'Source', value: incident.event.sourceIp),
-                _MetaChip(
-                  label: 'Destination',
-                  value: incident.event.destinationIp,
-                ),
+                _MetaChip(label: 'Destination', value: incident.event.destinationIp),
                 _MetaChip(label: 'Protocol', value: incident.event.protocol),
-                _MetaChip(
-                  label: 'Captured',
-                  value: formatDateTime(incident.event.capturedAt),
-                ),
+                _MetaChip(label: 'Captured', value: formatDateTime(incident.event.capturedAt)),
                 _MetaChip(
                   label: 'Bytes',
-                  value:
-                      '${incident.event.bytesTransferredKb.toStringAsFixed(0)} KB',
+                  value: '${incident.event.bytesTransferredKb.toStringAsFixed(0)} KB',
                 ),
                 _MetaChip(
                   label: 'Pkt/s',
@@ -81,6 +148,8 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
             ),
           ),
           const SizedBox(height: 16),
+
+          // ── Raw AI prediction ──────────────────────────────────────────────
           SectionCard(
             title: 'Raw AI prediction',
             subtitle: 'Primary model output before verification.',
@@ -102,9 +171,7 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
                         'Stability: ${incident.analysis.stabilityScore.toStringAsFixed(2)}',
                       ),
                     ),
-                    Chip(
-                      label: Text('Model: ${incident.analysis.modelVersion}'),
-                    ),
+                    Chip(label: Text('Model: ${incident.analysis.modelVersion}')),
                   ],
                 ),
                 const SizedBox(height: 16),
@@ -118,10 +185,13 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
             ),
           ),
           const SizedBox(height: 16),
+
+          // ── Verification layer ─────────────────────────────────────────────
           SectionCard(
             title: 'Verification layer',
             subtitle:
-                'The backend verifier combines neural confidence with stability, context and cross-evidence checks.',
+                'The backend ensemble verifier combines neural confidence, '
+                'MC uncertainty, and integrated gradients attribution.',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -145,47 +215,108 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
             ),
           ),
           const SizedBox(height: 16),
+
+          // ── Final decision ─────────────────────────────────────────────────
           SectionCard(
-            title: 'Final decision and analyst view',
-            subtitle:
-                '',
+            title: 'Final decision',
+            subtitle: '',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(incident.finalDecision.explanation),
-                const SizedBox(height: 12),
+                const SizedBox(height: 8),
                 Text(
-                  'Recommended analyst action: ${incident.finalDecision.recommendedAnalystAction}',
+                  'Recommended action: ${incident.finalDecision.recommendedAnalystAction}',
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // ── Analyst verdict ────────────────────────────────────────────────
+          SectionCard(
+            title: 'Analyst verdict',
+            subtitle: incident.reportId != null
+                ? 'Report #${incident.reportId} — select your verdict to train the model.'
+                : 'This incident was not saved to the database (offline mode).',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (_feedbackSubmitted) ...[
+                  _SubmittedBanner(verdict: _selectedVerdict!),
+                  const SizedBox(height: 16),
+                ],
+
+                // 4 verdict buttons in a 2×2 grid
+                GridView.count(
+                  crossAxisCount: 2,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 10,
+                  childAspectRatio: 2.8,
+                  children: _verdicts.map((v) {
+                    final selected = _selectedVerdict == v.value;
+                    return _VerdictButton(
+                      option: v,
+                      selected: selected,
+                      disabled: _feedbackSubmitted || incident.reportId == null,
+                      onTap: () => setState(() => _selectedVerdict = v.value),
+                    );
+                  }).toList(),
                 ),
                 const SizedBox(height: 16),
+
+                // Notes field
                 TextField(
-                  controller: analystController,
-                  minLines: 3,
-                  maxLines: 5,
+                  controller: _notesController,
+                  minLines: 2,
+                  maxLines: 4,
+                  enabled: !_feedbackSubmitted,
                   decoration: const InputDecoration(
-                    labelText: 'Analyst notes',
-                    hintText:
-                        'Add analyst interpretation, false-positive note or escalation comment.',
+                    labelText: 'Analyst notes (optional)',
+                    hintText: 'Add context, false-positive reason, or escalation note.',
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 14),
+
+                // Action buttons
                 Wrap(
                   spacing: 12,
                   runSpacing: 12,
                   children: [
                     FilledButton.icon(
+                      onPressed: _feedbackSubmitted ||
+                              _feedbackSubmitting ||
+                              _selectedVerdict == null ||
+                              incident.reportId == null
+                          ? null
+                          : _submitFeedback,
+                      icon: _feedbackSubmitting
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.send_outlined),
+                      label: Text(
+                        _feedbackSubmitted ? 'Verdict submitted' : 'Submit verdict',
+                      ),
+                    ),
+                    FilledButton.icon(
                       onPressed: () {
                         widget.controller.saveAnalystNotes(
                           incident: incident,
                           analystName: 'SOC Analyst',
-                          notes: analystController.text,
+                          notes: _notesController.text,
                         );
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Analyst notes saved')),
-                        );
+                        _showSnack('Analyst notes saved.');
                       },
                       icon: const Icon(Icons.save_outlined),
                       label: const Text('Save notes'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Theme.of(context).colorScheme.secondary,
+                      ),
                     ),
                     OutlinedButton.icon(
                       onPressed: report == null
@@ -194,7 +325,7 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
                               await widget.controller.exportReport(report);
                             },
                       icon: const Icon(Icons.picture_as_pdf_outlined),
-                      label: const Text('Export report PDF'),
+                      label: const Text('Export PDF'),
                     ),
                   ],
                 ),
@@ -206,6 +337,121 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
     );
   }
 }
+
+// ── Verdict option data ────────────────────────────────────────────────────────
+
+class _VerdictOption {
+  const _VerdictOption({
+    required this.value,
+    required this.label,
+    required this.description,
+    required this.icon,
+    required this.color,
+  });
+
+  final String value;
+  final String label;
+  final String description;
+  final IconData icon;
+  final Color color;
+}
+
+// ── Verdict button ─────────────────────────────────────────────────────────────
+
+class _VerdictButton extends StatelessWidget {
+  const _VerdictButton({
+    required this.option,
+    required this.selected,
+    required this.disabled,
+    required this.onTap,
+  });
+
+  final _VerdictOption option;
+  final bool selected;
+  final bool disabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = disabled ? Colors.grey : option.color;
+    return InkWell(
+      onTap: disabled ? null : onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: selected ? color.withValues(alpha: 0.12) : Colors.transparent,
+          border: Border.all(
+            color: selected ? color : color.withValues(alpha: 0.35),
+            width: selected ? 2 : 1,
+          ),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          children: [
+            Icon(option.icon, color: color, size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    option.label,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: color,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            if (selected)
+              Icon(Icons.check_circle, color: color, size: 16),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Submitted banner ───────────────────────────────────────────────────────────
+
+class _SubmittedBanner extends StatelessWidget {
+  const _SubmittedBanner({required this.verdict});
+
+  final String verdict;
+
+  @override
+  Widget build(BuildContext context) {
+    final option = _verdicts.firstWhere((v) => v.value == verdict);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: option.color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: option.color.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.check_circle, color: option.color, size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Verdict "${option.label}" submitted — this sample will be used for the next model fine-tune.',
+              style: TextStyle(color: option.color, fontSize: 13),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Meta chip ──────────────────────────────────────────────────────────────────
 
 class _MetaChip extends StatelessWidget {
   const _MetaChip({required this.label, required this.value});

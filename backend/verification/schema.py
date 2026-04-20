@@ -51,6 +51,12 @@ DERIVED_FEATURE_NAMES = [
     "context_consistency_score",
     "cross_evidence_score",
     "support_alignment_score",
+    # Raw indicator flags exposed individually so the MLP can learn their weights
+    # instead of relying on the hardcoded coefficients inside cross_evidence_score.
+    "indicator_risky_port",
+    "indicator_failed_logins_high",
+    "indicator_high_pps",
+    "indicator_high_bytes",
 ]
 
 VERIFIER_FEATURE_NAMES = [

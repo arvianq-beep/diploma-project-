@@ -88,6 +88,9 @@ def train(cic_path: str, unsw_path: str | None = None) -> dict:
     X = cic_bundle.frame[CANONICAL_FEATURES]
     y = cic_bundle.labels
 
+    # NOTE: test_size=0.2 and random_state=42 are intentional constants.
+    # train_verifier.py reproduces this exact split to avoid data leakage —
+    # if you change these values here, you MUST update train_verifier.py too.
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )

@@ -35,7 +35,7 @@ from flask_cors import CORS
 from datasets_storage import list_datasets, save_uploaded_dataset
 from ml.inference import MLPredictor
 from ml.schema import CANONICAL_FEATURES, CIC_COLUMN_ALIASES
-from storage import get_conn, init_db, insert_report
+from storage import get_conn, init_db, insert_report, add_analyst_feedback, ANALYST_VERDICTS
 from verification.inference import SecureDecisionVerificationService
 
 
@@ -212,7 +212,7 @@ def _analysis_response(event_payload: dict) -> dict:
         },
     }
 
-    insert_report(
+    report_id = insert_report(
         event_id=normalized_event["id"],
         label=detector_output.label,
         confidence=detector_output.confidence,
@@ -231,6 +231,7 @@ def _analysis_response(event_payload: dict) -> dict:
             "status": verification.final_decision_status,
             "recommended_action": verification.recommended_action,
             "threat_type": verification.threat_type,
+            "feature_snapshot": verification.feature_snapshot,
         },
         event_snapshot=normalized_event,
         traffic_context={
@@ -240,6 +241,7 @@ def _analysis_response(event_payload: dict) -> dict:
         },
         raw_input=event_payload,
     )
+    response["report_id"] = report_id
 
     return response
 
@@ -292,7 +294,7 @@ def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> d
         default=0.0,
     ) / 1024.0
     flow_bytes_per_second = read_float(
-        "Flow Bytes/s", "Flow Byts/s", "bytes_per_second", "flow_bytes_per_second", default=0.0
+        "flow_bytes_per_s", "Flow Bytes/s", "Flow Byts/s", "bytes_per_second", "flow_bytes_per_second", default=0.0
     )
     if bytes_kb == 0.0 and flow_bytes_per_second > 0 and duration > 0:
         bytes_kb = (flow_bytes_per_second * duration) / 1024.0
@@ -303,7 +305,7 @@ def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> d
         "backward_packets", "dpkts", "Tot Bwd Pkts", "Total Backward Packets", default=0.0
     )
     packets_per_second = read_float(
-        "packets_per_second", "Flow Packets/s", "Flow Pkts/s", "rate", default=0.0
+        "flow_packets_per_s", "packets_per_second", "Flow Packets/s", "Flow Pkts/s", "rate", default=0.0
     )
     if packets_per_second == 0.0 and duration > 0:
         total_packets = forward_packets + backward_packets
@@ -428,6 +430,46 @@ def verifier_metadata():
             "metrics": verifier_instance.metrics,
         }
     )
+
+
+@app.post("/api/v1/reports/<int:report_id>/feedback")
+def report_feedback(report_id: int):
+    """Record analyst verdict for a stored report.
+
+    Body: { "verdict": "confirmed_threat|confirmed_benign|false_positive|false_negative",
+            "notes": "optional free text" }
+
+    This is the primary data source for online learning.
+    """
+    body = request.get_json(silent=True) or {}
+    verdict = body.get("verdict", "")
+    if verdict not in ANALYST_VERDICTS:
+        return jsonify({"error": f"Unknown verdict. Allowed: {list(ANALYST_VERDICTS)}"}), 400
+    found = add_analyst_feedback(
+        report_id=report_id,
+        verdict=verdict,
+        notes=body.get("notes"),
+    )
+    if not found:
+        return jsonify({"error": f"Report {report_id} not found"}), 404
+    return jsonify({"status": "ok", "report_id": report_id, "verdict": verdict}), 200
+
+
+@app.post("/api/v1/ml/verifier/fine-tune")
+def verifier_fine_tune():
+    """Fine-tune the verifier ensemble on recent confirmed reports from reports.db."""
+    from verification.online_learning import fine_tune
+    body = request.get_json(silent=True) or {}
+    result = fine_tune(
+        hours=int(body.get("hours", 24)),
+        min_samples=int(body.get("min_samples", 50)),
+        epochs=int(body.get("epochs", 3)),
+        learning_rate=float(body.get("learning_rate", 1e-4)),
+    )
+    # Reload the verifier so the updated weights are used immediately.
+    global verifier
+    verifier = None
+    return jsonify(result), 200
 
 
 @app.post("/api/v1/analyze")
@@ -701,18 +743,32 @@ def realtime_interfaces():
     """List all available network interfaces with their descriptions."""
     result: dict = {"scapy": [], "pyshark": [], "errors": {}}
 
-    # --- scapy ---
+    # --- scapy (cross-platform) ---
     try:
-        from scapy.arch.windows import get_windows_if_list  # type: ignore
-        for iface in get_windows_if_list():
-            name: str = iface.get("name", "")
-            guid = name.replace(r"\Device\NPF_", "").strip("{}")
-            result["scapy"].append({
-                "guid": guid,
-                "name": name,
-                "description": iface.get("description", ""),
-                "ips": iface.get("ips", []),
-            })
+        if sys.platform == "win32":
+            from scapy.arch.windows import get_windows_if_list  # type: ignore
+            for iface in get_windows_if_list():
+                name: str = iface.get("name", "")
+                guid = name.replace(r"\Device\NPF_", "").strip("{}")
+                result["scapy"].append({
+                    "guid": guid,
+                    "name": name,
+                    "description": iface.get("description", ""),
+                    "ips": iface.get("ips", []),
+                })
+        else:
+            from scapy.all import get_if_list, get_if_addr  # type: ignore
+            for iface_name in get_if_list():
+                try:
+                    ip = get_if_addr(iface_name)
+                except Exception:
+                    ip = ""
+                result["scapy"].append({
+                    "guid": iface_name,
+                    "name": iface_name,
+                    "description": iface_name,
+                    "ips": [ip] if ip and ip != "0.0.0.0" else [],
+                })
     except Exception as exc:
         result["errors"]["scapy"] = str(exc)
 

@@ -82,11 +82,7 @@ class IdsApiService {
         (data['detector_details'] as Map?)?.cast<String, dynamic>() ?? {};
     final verificationDetails =
         (data['verification_details'] as Map?)?.cast<String, dynamic>() ?? {};
-    final checks =
-        ((verificationDetails['checks'] as List?) ?? const [])
-            .whereType<Map>()
-            .map((check) => _verificationCheckFromJson(check))
-            .toList();
+    final checks = _buildVerificationChecks(verificationDetails);
 
     final analysis = AnalysisResult(
       rawAiLabel:
@@ -153,6 +149,7 @@ class IdsApiService {
       analysis: analysis,
       verification: verification,
       finalDecision: finalDecision,
+      reportId: (data['report_id'] as num?)?.toInt(),
       analystReview: AnalystReview(
         state: status == FinalDecisionStatus.suspicious
             ? AnalystReviewState.pending
@@ -166,20 +163,148 @@ class IdsApiService {
     );
   }
 
-  VerificationCheck _verificationCheckFromJson(Map<dynamic, dynamic> rawCheck) {
-    final check = rawCheck.cast<String, dynamic>();
-    return VerificationCheck(
-      key: (check['key'] ?? '').toString(),
-      title: (check['title'] ?? '').toString(),
-      description: (check['description'] ?? '').toString(),
-      passed: check['passed'] == true,
-      score: (check['score'] as num?)?.toDouble() ?? 0.0,
-      weight: (check['weight'] as num?)?.toDouble() ?? 0.0,
-      evidence:
-          ((check['evidence'] as List?) ?? const [])
-              .map((item) => item.toString())
-              .toList(),
+  /// Submit analyst verdict for a stored report.
+  ///
+  /// [verdict] must be one of: confirmed_threat, confirmed_benign,
+  ///   false_positive, false_negative.
+  Future<void> submitAnalystFeedback({
+    required int reportId,
+    required String verdict,
+    String? notes,
+  }) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/api/v1/reports/$reportId/feedback'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'verdict': verdict,
+        if (notes != null && notes.isNotEmpty) 'notes': notes,
+      }),
     );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Feedback failed: ${response.statusCode}');
+    }
+  }
+
+  List<VerificationCheck> _buildVerificationChecks(
+    Map<String, dynamic> vd,
+  ) {
+    final md = (vd['model_decision'] as Map?)?.cast<String, dynamic>() ?? {};
+    final unc = (vd['uncertainty'] as Map?)?.cast<String, dynamic>() ?? {};
+    final ss = (vd['support_scores'] as Map?)?.cast<String, dynamic>() ?? {};
+    final pa = (vd['perturbation_analysis'] as Map?)?.cast<String, dynamic>() ?? {};
+    final fi = (vd['feature_importance'] as Map?)?.cast<String, dynamic>() ?? {};
+    final top5 = ((fi['top_5'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((e) => e.cast<String, dynamic>())
+        .toList();
+
+    final probability = (md['probability'] as num?)?.toDouble() ?? 0.0;
+    final aboveThreshold = md['above_threshold'] == true;
+    final threshold = (md['threshold_used'] as num?)?.toDouble() ?? 0.5;
+    final thresholdType = (md['threshold_type'] ?? 'general').toString();
+
+    final stdDev = (unc['std_deviation'] as num?)?.toDouble() ?? 0.0;
+    final isUncertain = unc['is_uncertain'] == true;
+    final meanProb = (unc['mean_probability'] as num?)?.toDouble() ?? probability;
+    final mcSamples = (unc['mc_samples'] as num?)?.toInt() ?? 30;
+    final ensembleMembers = (unc['ensemble_members'] as num?)?.toInt() ?? 0;
+
+    final contextScore = (ss['context_consistency_score'] as num?)?.toDouble() ?? 0.0;
+    final evidenceScore = (ss['cross_evidence_score'] as num?)?.toDouble() ?? 0.0;
+    final alignmentScore = (ss['support_alignment_score'] as num?)?.toDouble() ?? 0.0;
+
+    final labelConsistency = (pa['label_consistency_ratio'] as num?)?.toDouble() ?? 0.0;
+    final confidenceDrop = (pa['confidence_drop'] as num?)?.toDouble() ?? 0.0;
+    final stdConf = (pa['std_confidence'] as num?)?.toDouble() ?? 0.0;
+    final pertPassed = labelConsistency >= 0.74 && confidenceDrop <= 0.18;
+
+    final uncertaintyScore = (1.0 - stdDev * 5.0).clamp(0.0, 1.0);
+
+    return [
+      VerificationCheck(
+        key: 'neural_ensemble',
+        title: 'Neural Ensemble Decision',
+        description:
+            'An ensemble of $ensembleMembers MLP models voted on the trustworthiness '
+            'of the Stage-1 detector output. Score is the Platt-calibrated ensemble probability.',
+        passed: aboveThreshold,
+        score: probability,
+        weight: 0.35,
+        evidence: [
+          'Probability: ${probability.toStringAsFixed(4)}',
+          'Threshold ($thresholdType): ${threshold.toStringAsFixed(4)}',
+          aboveThreshold
+              ? 'Decision: above threshold → verified'
+              : 'Decision: below threshold → not verified',
+        ],
+      ),
+      VerificationCheck(
+        key: 'mc_uncertainty',
+        title: 'MC Dropout Uncertainty',
+        description:
+            'Monte Carlo dropout runs $mcSamples forward passes with active dropout '
+            'to estimate epistemic uncertainty. High std (> 0.12) routes to analyst review.',
+        passed: !isUncertain,
+        score: uncertaintyScore,
+        weight: 0.20,
+        evidence: [
+          'Mean probability: ${meanProb.toStringAsFixed(4)}',
+          'Std deviation: ${stdDev.toStringAsFixed(4)}',
+          'Uncertain: ${isUncertain ? "yes — routed to analyst" : "no"}',
+          'MC passes: $mcSamples × $ensembleMembers models',
+        ],
+      ),
+      VerificationCheck(
+        key: 'context_support',
+        title: 'Context & Evidence Support',
+        description:
+            'Context consistency and cross-evidence scores measure how well event '
+            'behavioral signals (port, failed logins, timing, repeated attempts) '
+            'align with the detector verdict.',
+        passed: alignmentScore >= 0.50,
+        score: alignmentScore,
+        weight: 0.20,
+        evidence: [
+          'Context consistency: ${contextScore.toStringAsFixed(4)}',
+          'Cross-evidence score: ${evidenceScore.toStringAsFixed(4)}',
+          'Support alignment: ${alignmentScore.toStringAsFixed(4)}',
+        ],
+      ),
+      VerificationCheck(
+        key: 'perturbation_stability',
+        title: 'Perturbation Stability',
+        description:
+            'The detector was re-run on 6 slightly modified flow variants '
+            '(rate ±6%, duration ±8%, byte/packet balance shifts). '
+            'High label consistency and low confidence drop confirm robustness.',
+        passed: pertPassed,
+        score: labelConsistency,
+        weight: 0.15,
+        evidence: [
+          'Label consistency: ${(labelConsistency * 100).toStringAsFixed(0)}%',
+          'Confidence drop: ${confidenceDrop.toStringAsFixed(4)}',
+          'Confidence std across variants: ${stdConf.toStringAsFixed(4)}',
+          pertPassed
+              ? 'Stability: passed (consistency ≥ 74%, drop ≤ 0.18)'
+              : 'Stability: failed',
+        ],
+      ),
+      VerificationCheck(
+        key: 'feature_attribution',
+        title: 'Integrated Gradients Attribution',
+        description:
+            'Integrated Gradients computes per-feature attributions against a '
+            'background baseline, revealing which signals drove the verifier\'s decision.',
+        passed: top5.isNotEmpty,
+        score: top5.isNotEmpty ? 1.0 : 0.0,
+        weight: 0.10,
+        evidence: top5.map((f) {
+          final feature = (f['feature'] ?? '').toString();
+          final attr = (f['attribution'] as num?)?.toDouble() ?? 0.0;
+          return '$feature: ${attr >= 0 ? "+" : ""}${attr.toStringAsFixed(4)}';
+        }).toList(),
+      ),
+    ];
   }
 
   FinalDecisionStatus _statusFromLabel(String label) {
@@ -282,19 +407,22 @@ class IdsApiService {
             .where((m) {
               final name = m['name'] as String? ?? '';
               final desc = m['description'] as String? ?? '';
-              // Keep only real NPF GUID adapters; skip loopback, etwdump, WAN miniports
-              return name.contains(r'\Device\NPF_{') &&
+              // Skip loopback and virtual adapters on all platforms
+              return name.isNotEmpty &&
+                  !name.toLowerCase().contains('loopback') &&
+                  !name.toLowerCase().startsWith('lo') &&
                   !desc.toLowerCase().contains('loopback') &&
                   !desc.toLowerCase().contains('wan miniport');
             })
             .map((m) {
               final name = m['name'] as String? ?? '';
               final desc = m['description'] as String? ?? '';
-              // Extract bare GUID — backend will rewrap it
-              final guid = name
-                  .replaceAll(r'\Device\NPF_{', '')
-                  .replaceAll('}', '');
-              return (value: guid, label: desc.isNotEmpty ? desc : guid);
+              // Windows: extract bare GUID from \Device\NPF_{GUID}
+              // Mac/Linux: use interface name directly (en0, eth0, etc.)
+              final value = name.contains(r'\Device\NPF_{')
+                  ? name.replaceAll(r'\Device\NPF_{', '').replaceAll('}', '')
+                  : name;
+              return (value: value, label: desc.isNotEmpty ? desc : name);
             })
             .toList();
       }

@@ -37,6 +37,10 @@ MIGRATIONS = {
     "verification_output": "ALTER TABLE reports ADD COLUMN verification_output TEXT",
     "final_decision": "ALTER TABLE reports ADD COLUMN final_decision TEXT",
     "event_snapshot": "ALTER TABLE reports ADD COLUMN event_snapshot TEXT",
+    # Analyst feedback columns — added for online learning
+    "analyst_verdict": "ALTER TABLE reports ADD COLUMN analyst_verdict TEXT",
+    "analyst_notes": "ALTER TABLE reports ADD COLUMN analyst_notes TEXT",
+    "analyst_reviewed_at": "ALTER TABLE reports ADD COLUMN analyst_reviewed_at TEXT",
 }
 
 
@@ -80,7 +84,7 @@ def insert_report(
 
     created_at = datetime.now(timezone.utc).isoformat()
     conn = get_conn()
-    conn.execute(
+    cursor = conn.execute(
         """
         INSERT INTO reports(
             created_at,
@@ -117,8 +121,45 @@ def insert_report(
             _json(raw_input),
         ),
     )
+    report_id = cursor.lastrowid
     conn.commit()
     conn.close()
+    return report_id
+
+
+# Allowed analyst verdicts and their verifier labels (1=verified, 0=not verified).
+ANALYST_VERDICTS: dict[str, int] = {
+    "confirmed_threat": 1,    # analyst says: yes, this is a real attack → trust detector
+    "confirmed_benign": 1,    # analyst says: correct benign → trust detector
+    "false_positive": 0,      # analyst says: detector flagged threat but it's benign → don't trust
+    "false_negative": 0,      # analyst says: detector missed a real attack → don't trust
+}
+
+
+def add_analyst_feedback(
+    *,
+    report_id: int,
+    verdict: str,
+    notes: str | None = None,
+) -> bool:
+    """Record analyst confirmation or rejection for a stored report.
+
+    Returns True if the report was found and updated, False otherwise.
+    Raises ValueError for unknown verdicts.
+    """
+    if verdict not in ANALYST_VERDICTS:
+        raise ValueError(f"Unknown verdict '{verdict}'. Allowed: {list(ANALYST_VERDICTS)}")
+
+    reviewed_at = datetime.now(timezone.utc).isoformat()
+    conn = get_conn()
+    cursor = conn.execute(
+        "UPDATE reports SET analyst_verdict=?, analyst_notes=?, analyst_reviewed_at=? WHERE id=?",
+        (verdict, notes, reviewed_at, report_id),
+    )
+    affected = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
 
 
 def _json(payload: dict[str, Any] | None) -> str | None:

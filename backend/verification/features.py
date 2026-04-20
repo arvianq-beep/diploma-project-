@@ -62,6 +62,7 @@ def build_verification_features(
         "context_consistency_score": round(context_score, 6),
         "cross_evidence_score": round(evidence_score, 6),
         "support_alignment_score": round(float(max(0.0, min(1.0, support_alignment))), 6),
+        **raw_indicator_feature_map(event, detector_output),
     }
 
     vector = [float(feature_map[name]) for name in VERIFIER_FEATURE_NAMES]
@@ -120,6 +121,29 @@ def perturbation_feature_map(summary: PerturbationSummary) -> dict[str, float]:
         "perturbation_confidence_drop": _clamp01(summary.confidence_drop),
         "perturbation_variance": _clamp01(summary.variance),
         "label_consistency_ratio": _clamp01(summary.label_consistency_ratio),
+    }
+
+
+def raw_indicator_feature_map(event: dict[str, Any], detector_output: PredictionOutput) -> dict[str, float]:
+    """Individual binary indicator flags exposed as standalone MLP features.
+
+    These mirror the rules inside cross_evidence_score but as separate inputs so
+    the MLP can learn its own weights for each indicator rather than depending on
+    the hardcoded coefficients in the aggregated score.
+    """
+    snapshot = detector_output.feature_snapshot
+    destination_port = int(_safe_float(event.get("destination_port")))
+    failed_logins = int(_safe_float(event.get("failed_logins")))
+    packets_per_second = _safe_float(snapshot.get("flow_packets_per_s")) if snapshot else _safe_float(event.get("packets_per_second"))
+    fwd_bytes = _safe_float(snapshot.get("total_length_fwd_packets", 0)) if snapshot else 0.0
+    bwd_bytes = _safe_float(snapshot.get("total_length_bwd_packets", 0)) if snapshot else 0.0
+    bytes_kb = (fwd_bytes + bwd_bytes) / 1024.0
+
+    return {
+        "indicator_risky_port": 1.0 if destination_port in {22, 23, 3389} else 0.0,
+        "indicator_failed_logins_high": 1.0 if failed_logins >= 6 else 0.0,
+        "indicator_high_pps": 1.0 if packets_per_second >= 550 else 0.0,
+        "indicator_high_bytes": 1.0 if bytes_kb >= 9000 else 0.0,
     }
 
 

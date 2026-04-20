@@ -22,6 +22,8 @@ class AppController extends ChangeNotifier {
 
   final IdsRepository _repository;
 
+  IdsRepository get repository => _repository;
+
   int _tabIndex = 0;
   bool _initializing = true;
   bool _isAnalyzing = false;
@@ -441,6 +443,7 @@ class AppController extends ChangeNotifier {
       analysis: analysis,
       verification: verification,
       finalDecision: finalDecision,
+      reportId: e.reportId,
       analystReview: AnalystReview(
         state: status == FinalDecisionStatus.suspicious
             ? AnalystReviewState.pending

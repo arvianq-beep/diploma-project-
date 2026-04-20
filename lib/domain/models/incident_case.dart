@@ -10,6 +10,8 @@ class IncidentCase {
   final VerificationResult verification;
   final FinalDecision finalDecision;
   final AnalystReview analystReview;
+  /// Database row ID from reports.db — null for mock/offline incidents.
+  final int? reportId;
 
   const IncidentCase({
     required this.event,
@@ -17,6 +19,7 @@ class IncidentCase {
     required this.verification,
     required this.finalDecision,
     required this.analystReview,
+    this.reportId,
   });
 
   IncidentCase copyWith({
@@ -25,6 +28,7 @@ class IncidentCase {
     VerificationResult? verification,
     FinalDecision? finalDecision,
     AnalystReview? analystReview,
+    int? reportId,
   }) {
     return IncidentCase(
       event: event ?? this.event,
@@ -32,6 +36,7 @@ class IncidentCase {
       verification: verification ?? this.verification,
       finalDecision: finalDecision ?? this.finalDecision,
       analystReview: analystReview ?? this.analystReview,
+      reportId: reportId ?? this.reportId,
     );
   }
 }

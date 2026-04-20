@@ -37,6 +37,8 @@ from collections import deque
 from dataclasses import asdict, dataclass
 from typing import Any, Deque, Iterator
 
+from storage import insert_report
+
 from .capture import BaseCapture, make_capture_source
 from .flow import FlowAggregator, FlowRecord, RawPacket
 
@@ -80,6 +82,9 @@ class StreamResult:
     verification_checks: list[dict]
     verification_summary: str
 
+    # DB primary key — set after insert_report(); None until saved
+    report_id: int | None = None
+
     def to_sse_dict(self) -> dict[str, Any]:
         """Compact representation for SSE / JSON serialisation."""
         return {
@@ -98,6 +103,7 @@ class StreamResult:
             "triggered_indicators": self.triggered_indicators,
             "verification_checks": self.verification_checks,
             "verification_summary": self.verification_summary,
+            "report_id": self.report_id,
         }
 
 
@@ -392,7 +398,16 @@ class StreamMonitor:
         results: list[StreamResult] = []
         for i, (flow, snap, det_out) in enumerate(zip(records, snapshots, detector_outputs)):
             try:
-                event = {"source": "realtime"}
+                src_ip_ev = flow.key[0]
+                dst_port_ev = flow.key[3]
+                pkts_per_s = snap.get("flow_packets_per_s", 0.0)
+                event = {
+                    "source": "realtime",
+                    "known_bad_source": src_ip_ev.startswith(("185.", "45.")),
+                    "repeated_attempts": pkts_per_s > 400 or dst_port_ev in {22, 23, 3389},
+                    "off_hours_activity": False,
+                    "failed_logins": 0,
+                }
                 ver_decision = self._verifier.evaluate(event=event, detector_output=det_out)
                 final_status = ver_decision.final_decision_status
             except Exception:
@@ -435,6 +450,26 @@ class StreamMonitor:
                 verification_checks=ver_details.get("checks", []),
                 verification_summary=ver_details.get("summary", ""),
             )
+            try:
+                result.report_id = insert_report(
+                    event_id=f"rt-{int(result.processed_at * 1000)}",
+                    label=result.detector_label,
+                    confidence=result.detector_confidence,
+                    decision_status=result.final_status,
+                    final_status=result.final_status,
+                    recommended_action=result.recommended_action,
+                    verification_output=ver_details if ver_details else None,
+                    event_snapshot={
+                        "src_ip": result.src_ip,
+                        "dst_ip": result.dst_ip,
+                        "src_port": result.src_port,
+                        "dst_port": result.dst_port,
+                        "proto": result.proto,
+                    },
+                )
+            except Exception:
+                pass  # DB failure must not break the realtime stream
+
             results.append(result)
             self._buffer.append(result)
             self._emit(result)

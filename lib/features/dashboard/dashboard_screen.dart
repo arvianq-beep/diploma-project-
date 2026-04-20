@@ -242,6 +242,7 @@ class _RecentEventTile extends StatelessWidget {
               builder: (_) => EventDetailsScreen(
                 controller: controller,
                 incident: incident,
+                repository: controller.repository,
               ),
             ),
           );

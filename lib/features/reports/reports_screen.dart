@@ -71,6 +71,7 @@ class _ReportTile extends StatelessWidget {
                   builder: (_) => EventDetailsScreen(
                     controller: controller,
                     incident: report.incident,
+                    repository: controller.repository,
                   ),
                 ),
               );
