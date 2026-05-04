@@ -210,4 +210,15 @@ class IdsRepository {
       notes: notes,
     );
   }
+
+  /// Fetch the LLM-generated AI fields for a report.
+  /// Returns nulls when the backend has not yet finished generating.
+  Future<({String? aiExplanation, String? aiRecommendations})>
+      fetchReportAiAnalysis(int reportId) async {
+    try {
+      return await _apiService.fetchReportAiAnalysis(reportId);
+    } catch (_) {
+      return (aiExplanation: null, aiRecommendations: null);
+    }
+  }
 }

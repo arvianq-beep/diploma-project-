@@ -150,6 +150,8 @@ class IdsApiService {
       verification: verification,
       finalDecision: finalDecision,
       reportId: (data['report_id'] as num?)?.toInt(),
+      aiExplanation: _nullIfEmpty(data['ai_explanation']),
+      aiRecommendations: _nullIfEmpty(data['ai_recommendations']),
       analystReview: AnalystReview(
         state: status == FinalDecisionStatus.suspicious
             ? AnalystReviewState.pending
@@ -160,6 +162,35 @@ class IdsApiService {
             : 'Backend detector and verifier pipeline completed automatically.',
         updatedAt: DateTime.now(),
       ),
+    );
+  }
+
+  String? _nullIfEmpty(Object? value) {
+    if (value == null) return null;
+    final s = value.toString().trim();
+    return s.isEmpty ? null : s;
+  }
+
+  /// Fetch the asynchronously-generated AI fields for a report.
+  ///
+  /// `aiExplanation` is populated for every analyzed report.
+  /// `aiRecommendations` is populated only for reports with status `Suspicious`.
+  /// Both fields may be `null` for a few seconds after analysis while Ollama is generating.
+  Future<({String? aiExplanation, String? aiRecommendations})>
+      fetchReportAiAnalysis(int reportId) async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl/api/v1/reports/$reportId'),
+    );
+    if (response.statusCode == 404) {
+      return (aiExplanation: null, aiRecommendations: null);
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Fetch report failed: ${response.statusCode}');
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    return (
+      aiExplanation: _nullIfEmpty(data['ai_explanation']),
+      aiRecommendations: _nullIfEmpty(data['ai_recommendations']),
     );
   }
 
@@ -390,6 +421,7 @@ class IdsApiService {
 
   /// Returns available network interfaces for pyshark/scapy, filtered to
   /// physical adapters only. Each entry: {value, label}.
+  /// Throws Exception with backend error details if available.
   Future<List<({String value, String label})>> fetchRealtimeInterfaces(
     String source,
   ) async {
@@ -397,8 +429,16 @@ class IdsApiService {
       final response = await _client.get(
         Uri.parse('$baseUrl/api/realtime/interfaces'),
       );
-      if (response.statusCode < 200 || response.statusCode >= 300) return [];
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('Failed to fetch interfaces: ${response.statusCode}');
+      }
       final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+      // Check for backend errors
+      final errors = (data['errors'] as Map<String, dynamic>?) ?? {};
+      if (errors.containsKey(source)) {
+        throw Exception('${source.toUpperCase()} error: ${errors[source]}');
+      }
 
       if (source == 'pyshark') {
         final list = (data['pyshark'] as List?) ?? const [];
@@ -458,8 +498,8 @@ class IdsApiService {
       }
 
       return [];
-    } catch (_) {
-      return [];
+    } catch (e) {
+      throw Exception('Failed to fetch $source interfaces: $e');
     }
   }
 

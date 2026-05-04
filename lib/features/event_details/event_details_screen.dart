@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:diploma_application_ml/core/utils/formatters.dart';
 import 'package:diploma_application_ml/data/repositories/ids_repository.dart';
+import 'package:diploma_application_ml/domain/models/final_decision_status.dart';
 import 'package:diploma_application_ml/domain/models/incident_case.dart';
 import 'package:diploma_application_ml/features/home/app_controller.dart';
 import 'package:diploma_application_ml/shared/widgets/section_card.dart';
@@ -61,18 +64,72 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
   bool _feedbackSubmitting = false;
   bool _feedbackSubmitted = false;
 
+  // Async LLM artifacts. Populated by polling /api/v1/reports/<id>.
+  String? _aiExplanation;
+  String? _aiRecommendations;
+  bool _aiLoading = false;
+  Timer? _aiPollTimer;
+  int _aiPollAttempts = 0;
+
+  static const _aiPollInterval = Duration(seconds: 2);
+  static const _aiPollMaxAttempts = 30; // ~60 s ceiling
+
   @override
   void initState() {
     super.initState();
     _notesController = TextEditingController(
       text: widget.incident.analystReview.notes,
     );
+    _aiExplanation = widget.incident.aiExplanation;
+    _aiRecommendations = widget.incident.aiRecommendations;
+    _maybeStartAiPolling();
   }
 
   @override
   void dispose() {
+    _aiPollTimer?.cancel();
     _notesController.dispose();
     super.dispose();
+  }
+
+  bool get _aiComplete {
+    if (_aiExplanation == null || _aiExplanation!.isEmpty) return false;
+    final isSuspicious =
+        widget.incident.finalDecision.status == FinalDecisionStatus.suspicious;
+    if (!isSuspicious) return true;
+    return _aiRecommendations != null && _aiRecommendations!.isNotEmpty;
+  }
+
+  void _maybeStartAiPolling() {
+    final reportId = widget.incident.reportId;
+    if (reportId == null || _aiComplete) return;
+    _aiLoading = true;
+    _aiPollTimer = Timer.periodic(_aiPollInterval, (_) => _pollAiAnalysis());
+    // Trigger an immediate first attempt so we don't wait the full interval.
+    _pollAiAnalysis();
+  }
+
+  Future<void> _pollAiAnalysis() async {
+    final reportId = widget.incident.reportId;
+    if (reportId == null) {
+      _aiPollTimer?.cancel();
+      return;
+    }
+    _aiPollAttempts += 1;
+    final result = await widget.repository.fetchReportAiAnalysis(reportId);
+    if (!mounted) return;
+    setState(() {
+      if (result.aiExplanation != null) {
+        _aiExplanation = result.aiExplanation;
+      }
+      if (result.aiRecommendations != null) {
+        _aiRecommendations = result.aiRecommendations;
+      }
+      if (_aiComplete || _aiPollAttempts >= _aiPollMaxAttempts) {
+        _aiLoading = false;
+        _aiPollTimer?.cancel();
+      }
+    });
   }
 
   Future<void> _submitFeedback() async {
@@ -215,6 +272,25 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
             ),
           ),
           const SizedBox(height: 16),
+
+          // ── AI Analysis (LLM) ─────────────────────────────────────────────
+          if (incident.reportId != null) ...[
+            SectionCard(
+              title: 'AI Analysis',
+              subtitle: incident.finalDecision.status ==
+                      FinalDecisionStatus.suspicious
+                  ? 'Plain-language summary and recommended investigation steps.'
+                  : 'Plain-language summary of the verifier decision.',
+              child: _AiAnalysisBody(
+                explanation: _aiExplanation,
+                recommendations: _aiRecommendations,
+                loading: _aiLoading,
+                isSuspicious: incident.finalDecision.status ==
+                    FinalDecisionStatus.suspicious,
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
 
           // ── Final decision ─────────────────────────────────────────────────
           SectionCard(
@@ -447,6 +523,95 @@ class _SubmittedBanner extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ── AI Analysis body ──────────────────────────────────────────────────────────
+
+class _AiAnalysisBody extends StatelessWidget {
+  const _AiAnalysisBody({
+    required this.explanation,
+    required this.recommendations,
+    required this.loading,
+    required this.isSuspicious,
+  });
+
+  final String? explanation;
+  final String? recommendations;
+  final bool loading;
+  final bool isSuspicious;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final hasExplanation = explanation != null && explanation!.trim().isNotEmpty;
+    final hasRecommendations =
+        recommendations != null && recommendations!.trim().isNotEmpty;
+
+    if (!hasExplanation && !hasRecommendations) {
+      return Row(
+        children: [
+          if (loading) ...[
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Generating explanation… (Ollama is working in the background)',
+                style: textTheme.bodyMedium,
+              ),
+            ),
+          ] else
+            Expanded(
+              child: Text(
+                'No AI explanation available. Make sure the Ollama service is running.',
+                style: textTheme.bodyMedium?.copyWith(color: Colors.grey),
+              ),
+            ),
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (hasExplanation) ...[
+          Text('Explanation', style: textTheme.titleSmall),
+          const SizedBox(height: 6),
+          Text(explanation!.trim(), style: textTheme.bodyMedium),
+        ],
+        if (hasExplanation && (hasRecommendations || (loading && isSuspicious)))
+          const SizedBox(height: 14),
+        if (hasRecommendations) ...[
+          Text(
+            'Recommended investigation steps',
+            style: textTheme.titleSmall,
+          ),
+          const SizedBox(height: 6),
+          Text(recommendations!.trim(), style: textTheme.bodyMedium),
+        ] else if (loading && isSuspicious) ...[
+          Row(
+            children: [
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Generating recommendations…',
+                  style: textTheme.bodyMedium,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ],
     );
   }
 }

@@ -41,6 +41,8 @@ MIGRATIONS = {
     "analyst_verdict": "ALTER TABLE reports ADD COLUMN analyst_verdict TEXT",
     "analyst_notes": "ALTER TABLE reports ADD COLUMN analyst_notes TEXT",
     "analyst_reviewed_at": "ALTER TABLE reports ADD COLUMN analyst_reviewed_at TEXT",
+    "ai_explanation": "ALTER TABLE reports ADD COLUMN ai_explanation TEXT",
+    "ai_recommendations": "ALTER TABLE reports ADD COLUMN ai_recommendations TEXT",
 }
 
 
@@ -160,6 +162,57 @@ def add_analyst_feedback(
     conn.commit()
     conn.close()
     return affected > 0
+
+
+def update_report_explanation(report_id: int, explanation: str) -> bool:
+    """Persist the LLM-generated natural-language explanation for a report."""
+    conn = get_conn()
+    cursor = conn.execute(
+        "UPDATE reports SET ai_explanation=? WHERE id=?",
+        (explanation, report_id),
+    )
+    affected = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
+def update_report_recommendations(report_id: int, recommendations: str) -> bool:
+    """Persist the LLM-generated investigation recommendations for a Suspicious report."""
+    conn = get_conn()
+    cursor = conn.execute(
+        "UPDATE reports SET ai_recommendations=? WHERE id=?",
+        (recommendations, report_id),
+    )
+    affected = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
+def get_report_by_id(report_id: int) -> dict[str, Any] | None:
+    """Fetch a single report row as a dict, with JSON blob columns deserialized."""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM reports WHERE id=?", (report_id,)).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    item = dict(row)
+    for key in (
+        "detector_output",
+        "verification_output",
+        "final_decision",
+        "event_snapshot",
+        "traffic_context",
+        "raw_input",
+    ):
+        raw = item.get(key)
+        if isinstance(raw, str) and raw:
+            try:
+                item[key] = json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+    return item
 
 
 def _json(payload: dict[str, Any] | None) -> str | None:

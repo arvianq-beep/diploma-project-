@@ -12,6 +12,10 @@ class IncidentCase {
   final AnalystReview analystReview;
   /// Database row ID from reports.db — null for mock/offline incidents.
   final int? reportId;
+  /// LLM-generated natural-language explanation. Populated asynchronously by Ollama.
+  final String? aiExplanation;
+  /// LLM-generated investigation recommendations. Populated only for Suspicious incidents.
+  final String? aiRecommendations;
 
   const IncidentCase({
     required this.event,
@@ -20,6 +24,8 @@ class IncidentCase {
     required this.finalDecision,
     required this.analystReview,
     this.reportId,
+    this.aiExplanation,
+    this.aiRecommendations,
   });
 
   IncidentCase copyWith({
@@ -29,6 +35,8 @@ class IncidentCase {
     FinalDecision? finalDecision,
     AnalystReview? analystReview,
     int? reportId,
+    String? aiExplanation,
+    String? aiRecommendations,
   }) {
     return IncidentCase(
       event: event ?? this.event,
@@ -37,6 +45,8 @@ class IncidentCase {
       finalDecision: finalDecision ?? this.finalDecision,
       analystReview: analystReview ?? this.analystReview,
       reportId: reportId ?? this.reportId,
+      aiExplanation: aiExplanation ?? this.aiExplanation,
+      aiRecommendations: aiRecommendations ?? this.aiRecommendations,
     );
   }
 }
