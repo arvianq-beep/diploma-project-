@@ -288,7 +288,7 @@ class _EventSelector extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           DropdownButtonFormField<String>(
-            initialValue: selectedValue,
+            value: selectedValue,
             items: controller.sampleEvents
                 .map(
                   (event) => DropdownMenuItem<String>(

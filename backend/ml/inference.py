@@ -129,9 +129,18 @@ class MLPredictor:
         self.feature_order = list(CANONICAL_FEATURES)
 
         if self.model_path.exists():
-            self.pipeline = load(self.model_path)
-            self.available = True
-            self._validate_feature_order()
+            try:
+                self.pipeline = load(self.model_path)
+                self.available = True
+                self._validate_feature_order()
+            except Exception:
+                # The bundled artifact can be older than the enforced 77-feature
+                # schema or serialized with an incompatible sklearn layout.
+                # Keep the service available by falling back to heuristic mode
+                # instead of crashing the server at startup.
+                self.pipeline = None
+                self.available = False
+                self.model_version = "heuristic-fallback"
         else:
             self.model_version = "heuristic-fallback"
 

@@ -38,7 +38,7 @@ class _RealtimeMonitorView extends StatelessWidget {
         const Divider(height: 1),
         Expanded(
           child: events.isEmpty
-              ? _EmptyState(running: running)
+              ? _EmptyState(running: running, error: controller.error)
               : _EventList(events: events, palette: palette, controller: controller),
         ),
       ],
@@ -64,6 +64,7 @@ class _HeaderState extends State<_Header> {
   List<({String value, String label})> _interfaces = [];
   String? _selectedInterface;
   bool _loadingInterfaces = false;
+  String? _interfaceError;
 
   static const _sources = [
     ('synthetic', 'Synthetic (demo)'),
@@ -79,15 +80,24 @@ class _HeaderState extends State<_Header> {
       _loadingInterfaces = true;
       _interfaces = [];
       _selectedInterface = null;
+      _interfaceError = null;
     });
-    final list =
-        await widget.controller.fetchRealtimeInterfaces(source);
-    if (!mounted) return;
-    setState(() {
-      _interfaces = list;
-      _selectedInterface = list.isNotEmpty ? list.first.value : null;
-      _loadingInterfaces = false;
-    });
+    try {
+      final list =
+          await widget.controller.fetchRealtimeInterfaces(source);
+      if (!mounted) return;
+      setState(() {
+        _interfaces = list;
+        _selectedInterface = list.isNotEmpty ? list.first.value : null;
+        _loadingInterfaces = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingInterfaces = false;
+        _interfaceError = e.toString().replaceFirst('Exception: ', '');
+      });
+    }
   }
 
   @override
@@ -127,6 +137,14 @@ class _HeaderState extends State<_Header> {
                       width: 20,
                       height: 20,
                       child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  else if (_interfaceError != null)
+                    Tooltip(
+                      message: _interfaceError,
+                      child: const Text(
+                        'Error loading interfaces',
+                        style: TextStyle(fontSize: 13, color: Colors.red),
+                      ),
                     )
                   else if (_interfaces.isNotEmpty)
                     DropdownButton<String>(
@@ -269,12 +287,45 @@ class _StatChip extends StatelessWidget {
 // Empty state
 // ---------------------------------------------------------------------------
 class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.running});
+  const _EmptyState({required this.running, this.error});
 
   final bool running;
+  final String? error;
 
   @override
   Widget build(BuildContext context) {
+    if (error != null && !running) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.error_outline,
+                size: 64,
+                color: Theme.of(context).colorScheme.error,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Failed to start monitoring',
+                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                error!,
+                style: Theme.of(context).textTheme.bodyMedium,
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
