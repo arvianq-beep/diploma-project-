@@ -18,15 +18,10 @@ class ReportsScreen extends StatelessWidget {
       children: [
         Text('Reports', style: Theme.of(context).textTheme.headlineMedium),
         const SizedBox(height: 8),
-        Text(
-          'Every processed event produces a structured report with event metadata, raw AI output, verification results and analyst notes.',
-          style: Theme.of(context).textTheme.bodyLarge,
-        ),
         const SizedBox(height: 20),
         SectionCard(
           title: 'Generated reports',
-          subtitle:
-              'Open a case, review the summary or export a PDF for your diploma presentation.',
+          subtitle:'',
           child: Column(
             children: controller.reports
                 .map(

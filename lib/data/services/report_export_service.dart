@@ -7,12 +7,52 @@ import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 
 class ReportExportService {
   const ReportExportService();
 
+  // Helvetica (the pdf package default) has no Unicode support.
+  // Replace known non-ASCII symbols with ASCII equivalents so characters
+  // like →, —, ≥, ≤ don't disappear silently in the generated PDF.
+  // Truncate evidence list: keep up to 3 items, max 60 chars each.
+  static String _evidence(List<String> items) {
+    const maxItems = 3;
+    const maxChars = 60;
+    final truncated = items.take(maxItems).map((e) {
+      final s = _s(e);
+      return s.length > maxChars ? '${s.substring(0, maxChars)}...' : s;
+    }).toList();
+    if (items.length > maxItems) {
+      truncated.add('+${items.length - maxItems} more');
+    }
+    return truncated.join('\n');
+  }
+
+  static String _s(String text) {
+    return text
+        .replaceAll('→', '->')
+        .replaceAll('←', '<-')
+        .replaceAll('—', '--')
+        .replaceAll('–', '-')
+        .replaceAll('≥', '>=')
+        .replaceAll('≤', '<=')
+        .replaceAll('≠', '!=')
+        .replaceAll('…', '...')
+        .replaceAll(' ', ' '); // non-breaking space
+  }
+
   Future<String> exportReport(ReportModel report) async {
-    final document = pw.Document();
+    // Load TTF fonts so the pdf package stops using Helvetica (no Unicode).
+    final fontRegular = await PdfGoogleFonts.robotoRegular();
+    final fontBold    = await PdfGoogleFonts.robotoBold();
+
+    final document = pw.Document(
+      theme: pw.ThemeData.withFont(
+        base: fontRegular,
+        bold: fontBold,
+      ),
+    );
     final incident = report.incident;
 
     document.addPage(
@@ -32,27 +72,25 @@ class ReportExportService {
               'Report summary',
               style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
             ),
-            pw.Text(report.summary),
+            pw.Text(_s(report.summary)),
             pw.SizedBox(height: 16),
             pw.Text(
               'Event metadata',
               style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
             ),
-            pw.Bullet(text: 'Event ID: ${incident.event.id}'),
-            pw.Bullet(text: 'Event title: ${incident.event.title}'),
+            pw.Bullet(text: 'Event ID: ${_s(incident.event.id)}'),
+            pw.Bullet(text: 'Event title: ${_s(incident.event.title)}'),
             pw.Bullet(
               text: 'Captured at: ${formatDateTime(incident.event.capturedAt)}',
             ),
             pw.Bullet(
-              text:
-                  'Source: ${incident.event.sourceIp}:${incident.event.sourcePort}',
+              text: 'Source: ${incident.event.sourceIp}:${incident.event.sourcePort}',
             ),
             pw.Bullet(
-              text:
-                  'Destination: ${incident.event.destinationIp}:${incident.event.destinationPort}',
+              text: 'Destination: ${incident.event.destinationIp}:${incident.event.destinationPort}',
             ),
             pw.Bullet(text: 'Protocol: ${incident.event.protocol}'),
-            pw.Bullet(text: 'Sample source: ${incident.event.sampleSource}'),
+            pw.Bullet(text: 'Sample source: ${_s(incident.event.sampleSource)}'),
             pw.SizedBox(height: 16),
             pw.Text(
               'Raw AI result',
@@ -60,18 +98,15 @@ class ReportExportService {
             ),
             pw.Bullet(text: 'Label: ${incident.analysis.rawAiLabel}'),
             pw.Bullet(
-              text:
-                  'Confidence: ${incident.analysis.rawConfidence.toStringAsFixed(2)}',
+              text: 'Confidence: ${incident.analysis.rawConfidence.toStringAsFixed(2)}',
             ),
             pw.Bullet(text: 'Model version: ${incident.analysis.modelVersion}'),
             pw.Bullet(
-              text:
-                  'Stability score: ${incident.analysis.stabilityScore.toStringAsFixed(2)}',
+              text: 'Stability score: ${incident.analysis.stabilityScore.toStringAsFixed(2)}',
             ),
-            pw.Bullet(text: 'Reasoning: ${incident.analysis.reasoning}'),
+            pw.Bullet(text: 'Reasoning: ${_s(incident.analysis.reasoning)}'),
             pw.Bullet(
-              text:
-                  'Alternative hypothesis: ${incident.analysis.alternativeHypothesis}',
+              text: 'Alternative hypothesis: ${_s(incident.analysis.alternativeHypothesis)}',
             ),
             pw.SizedBox(height: 16),
             pw.Text(
@@ -80,13 +115,21 @@ class ReportExportService {
             ),
             pw.TableHelper.fromTextArray(
               headers: const ['Check', 'Pass', 'Score', 'Evidence'],
+              // Pass and Score get fixed widths; Check and Evidence share
+              // the rest with a 3:4 ratio so evidence stays readable.
+              columnWidths: {
+                0: const pw.FlexColumnWidth(3),
+                1: const pw.FixedColumnWidth(42),
+                2: const pw.FixedColumnWidth(38),
+                3: const pw.FlexColumnWidth(4),
+              },
               data: incident.verification.checks
                   .map(
                     (check) => [
-                      check.title,
+                      _s(check.title),
                       check.passed ? 'Passed' : 'Failed',
                       check.score.toStringAsFixed(2),
-                      check.evidence.join(' | '),
+                      _evidence(check.evidence),
                     ],
                   )
                   .toList(),
@@ -107,15 +150,13 @@ class ReportExportService {
             ),
             pw.Bullet(text: 'Status: ${incident.finalDecision.status.label}'),
             pw.Bullet(
-              text:
-                  'Decision time: ${formatDateTime(incident.finalDecision.timestamp)}',
+              text: 'Decision time: ${formatDateTime(incident.finalDecision.timestamp)}',
             ),
             pw.Bullet(
-              text: 'Explanation: ${incident.finalDecision.explanation}',
+              text: 'Explanation: ${_s(incident.finalDecision.explanation)}',
             ),
             pw.Bullet(
-              text:
-                  'Recommended action: ${incident.finalDecision.recommendedAnalystAction}',
+              text: 'Recommended action: ${_s(incident.finalDecision.recommendedAnalystAction)}',
             ),
             pw.SizedBox(height: 16),
             pw.Text(
@@ -126,7 +167,7 @@ class ReportExportService {
               text: 'Review state: ${incident.analystReview.state.name}',
             ),
             pw.Bullet(text: 'Analyst: ${incident.analystReview.analystName}'),
-            pw.Bullet(text: 'Notes: ${incident.analystReview.notes}'),
+            pw.Bullet(text: 'Notes: ${_s(incident.analystReview.notes)}'),
           ];
         },
       ),

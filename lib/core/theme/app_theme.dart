@@ -42,10 +42,15 @@ ThemeData buildAppTheme() {
     ),
     chipTheme: ChipThemeData(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
-      side: BorderSide.none,
+      side: BorderSide(color: accent.withValues(alpha: 0.18)),
       selectedColor: accent.withValues(alpha: 0.12),
       backgroundColor: const Color(0xFFEFF4FB),
-      labelStyle: const TextStyle(fontWeight: FontWeight.w600),
+      // Explicit color so Material 3 doesn't compute it as grey on
+      // light surfaces.
+      labelStyle: const TextStyle(
+        fontWeight: FontWeight.w600,
+        color: Color(0xFF0B1220),
+      ),
     ),
     textTheme: const TextTheme(
       headlineMedium: TextStyle(

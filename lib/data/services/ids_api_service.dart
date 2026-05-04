@@ -152,6 +152,7 @@ class IdsApiService {
       reportId: (data['report_id'] as num?)?.toInt(),
       aiExplanation: _nullIfEmpty(data['ai_explanation']),
       aiRecommendations: _nullIfEmpty(data['ai_recommendations']),
+      explanationPending: data['explanation_pending'] == true,
       analystReview: AnalystReview(
         state: status == FinalDecisionStatus.suspicious
             ? AnalystReviewState.pending

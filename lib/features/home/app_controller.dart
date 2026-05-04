@@ -444,6 +444,7 @@ class AppController extends ChangeNotifier {
       verification: verification,
       finalDecision: finalDecision,
       reportId: e.reportId,
+      explanationPending: e.explanationPending,
       analystReview: AnalystReview(
         state: status == FinalDecisionStatus.suspicious
             ? AnalystReviewState.pending

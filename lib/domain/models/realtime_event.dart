@@ -17,6 +17,7 @@ class RealtimeEvent {
     required this.verificationChecks,
     required this.verificationSummary,
     this.reportId,
+    this.explanationPending = false,
   });
 
   final DateTime processedAt;
@@ -36,6 +37,7 @@ class RealtimeEvent {
   final List<Map<String, dynamic>> verificationChecks;
   final String verificationSummary;
   final int? reportId;
+  final bool explanationPending;
 
   bool get isThreat => detectorLabel != 'Benign';
   bool get isVerifiedThreat => finalStatus == 'Verified Threat';
@@ -72,6 +74,7 @@ class RealtimeEvent {
       verificationSummary:
           (json['verification_summary'] ?? '').toString(),
       reportId: (json['report_id'] as num?)?.toInt(),
+      explanationPending: json['explanation_pending'] == true,
     );
   }
 }

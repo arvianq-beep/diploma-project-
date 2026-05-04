@@ -16,6 +16,7 @@ module can be imported on machines that have neither library installed.
 from __future__ import annotations
 
 import random
+import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Iterator
@@ -35,6 +36,9 @@ class BaseCapture(ABC):
 
     def __iter__(self) -> Iterator[RawPacket]:
         return self.packets()
+
+    def stop(self) -> None:
+        """Signal capture to stop. No-op by default; override as needed."""
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +62,7 @@ class PysharkCapture(BaseCapture):
         interface: str = "eth0",
         bpf_filter: str = "ip",
         timeout: float | None = None,
+        promiscuous: bool = False,
     ) -> None:
         try:
             import pyshark as _pyshark  # type: ignore[import]
@@ -70,29 +75,97 @@ class PysharkCapture(BaseCapture):
         self.interface = interface
         self.bpf_filter = bpf_filter
         self.timeout = timeout
+        self.promiscuous = promiscuous
+        self._stop_event = threading.Event()
+        # Set by _sniff_thread so stop() can actively kill tshark.
+        self._live_capture = None
+        self._capture_loop = None
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        # Actively schedule close_async() on the capture's own event loop.
+        # This kills the tshark subprocess immediately instead of waiting
+        # for the next packet to arrive.
+        import asyncio
+        capture = self._live_capture
+        loop = self._capture_loop
+        if capture is not None and loop is not None and not loop.is_closed():
+            try:
+                asyncio.run_coroutine_threadsafe(capture.close_async(), loop)
+            except Exception:
+                pass
 
     def packets(self) -> Iterator[RawPacket]:
         import asyncio
+        import queue as queue_module
 
-        # Python 3.10+ no longer auto-creates an event loop in non-main threads.
-        # pyshark calls asyncio.get_event_loop() during LiveCapture.__init__,
-        # which raises RuntimeError when called from a worker thread with no loop.
-        try:
-            asyncio.get_event_loop()
-        except RuntimeError:
-            asyncio.set_event_loop(asyncio.new_event_loop())
+        q: queue_module.Queue[RawPacket | None] = queue_module.Queue()
+        self._stop_event.clear()
+        self._live_capture = None
+        self._capture_loop = None
 
-        capture = self._pyshark.LiveCapture(
-            interface=self.interface,
-            bpf_filter=self.bpf_filter,
-        )
-        for pkt in capture.sniff_continuously():
-            parsed = self._parse(pkt)
-            if parsed is not None:
-                yield parsed
+        def _sniff_thread() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            kwargs: dict = {
+                "interface": self.interface,
+                "bpf_filter": self.bpf_filter,
+            }
+            # Disable promiscuous mode via tshark -p flag (avoids DNS breakage
+            # on Windows). Try the pyshark kwarg first; fall back to tshark arg.
+            import inspect
+            if "use_promiscuous_mode" in inspect.signature(
+                self._pyshark.LiveCapture.__init__
+            ).parameters:
+                kwargs["use_promiscuous_mode"] = self.promiscuous
+            elif not self.promiscuous:
+                kwargs["custom_parameters"] = ["-p"]
+            capture = self._pyshark.LiveCapture(**kwargs)
+            # Expose to stop() before blocking on sniff_continuously().
+            self._live_capture = capture
+            self._capture_loop = loop
+            try:
+                for pkt in capture.sniff_continuously():
+                    if self._stop_event.is_set():
+                        break
+                    parsed = self._parse(pkt)
+                    if parsed is not None:
+                        q.put(parsed)
+            except Exception:
+                # Expected when close_async() kills tshark mid-read.
+                pass
+            finally:
+                self._live_capture = None
+                self._capture_loop = None
+                # Close in the owning thread/loop to avoid __del__ errors.
+                try:
+                    if not loop.is_closed():
+                        loop.run_until_complete(capture.close_async())
+                except Exception:
+                    pass
+                try:
+                    if not loop.is_closed():
+                        loop.close()
+                except Exception:
+                    pass
+                q.put(None)  # sentinel — signals packets() to return
+
+        thread = threading.Thread(target=_sniff_thread, daemon=True)
+        thread.start()
+
+        while True:
+            try:
+                item = q.get(timeout=0.5)
+            except queue_module.Empty:
+                if self._stop_event.is_set():
+                    break
+                continue
+            if item is None:
+                break
+            yield item
 
     @staticmethod
-    def _parse(pkt: Any) -> RawPacket | None:  # type: ignore[name-defined]
+    def _parse(pkt) -> RawPacket | None:
         """Convert a pyshark packet to RawPacket, or return None if not parseable."""
         try:
             if not hasattr(pkt, "ip"):
@@ -170,21 +243,30 @@ class ScapyCapture(BaseCapture):
         self.interface = interface
         self.bpf_filter = bpf_filter
         self.count = count
-        self._queue: list[RawPacket] = []
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
 
     def packets(self) -> Iterator[RawPacket]:
-        import queue
-        import threading
+        import queue as queue_module
 
-        q: queue.Queue[RawPacket | None] = queue.Queue()
+        q: queue_module.Queue[RawPacket | None] = queue_module.Queue()
+        self._stop_event.clear()
 
-        def _on_pkt(pkt: Any) -> None:  # type: ignore[name-defined]
+        def _on_pkt(pkt) -> None:
             parsed = self._parse(pkt)
             if parsed is not None:
                 q.put(parsed)
 
         def _sniff_thread() -> None:
-            kwargs: dict = {"prn": _on_pkt, "store": False, "filter": self.bpf_filter}
+            kwargs: dict = {
+                "prn": _on_pkt,
+                "store": False,
+                "filter": self.bpf_filter,
+                # stop_filter is checked after each packet; stops the sniff loop.
+                "stop_filter": lambda _: self._stop_event.is_set(),
+            }
             if self.interface:
                 kwargs["iface"] = self.interface
             if self.count > 0:
@@ -196,12 +278,17 @@ class ScapyCapture(BaseCapture):
         thread.start()
 
         while True:
-            item = q.get()
+            try:
+                item = q.get(timeout=0.5)
+            except queue_module.Empty:
+                if self._stop_event.is_set():
+                    break
+                continue
             if item is None:
                 break
             yield item
 
-    def _parse(self, pkt: Any) -> RawPacket | None:  # type: ignore[name-defined]
+    def _parse(self, pkt) -> RawPacket | None:
         try:
             if self._IP not in pkt:
                 return None
@@ -275,14 +362,22 @@ class SyntheticFlowSource(BaseCapture):
         self.rate_limit = rate_limit
         self.attack_ratio = attack_ratio
         self._rng = random.Random(seed)
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
 
     def packets(self) -> Iterator[RawPacket]:
-        while True:
+        self._stop_event.clear()
+        while not self._stop_event.is_set():
             is_attack = self._rng.random() < self.attack_ratio
             for pkt in self._make_flow(is_attack):
                 yield pkt
                 if self.rate_limit > 0:
-                    time.sleep(self.rate_limit)
+                    # Interruptible sleep: wakes immediately on stop().
+                    self._stop_event.wait(timeout=self.rate_limit)
+                if self._stop_event.is_set():
+                    return
 
     def _make_flow(self, is_attack: bool) -> list[RawPacket]:
         """Generate a short synthetic flow (3–20 packets) as a list of RawPackets."""
@@ -344,6 +439,7 @@ def make_capture_source(
     rate_limit: float = 0.0,
     attack_ratio: float = 0.3,
     seed: int | None = None,
+    promiscuous: bool = False,
 ) -> BaseCapture:
     """Factory: return the appropriate capture source by name.
 
@@ -361,7 +457,7 @@ def make_capture_source(
         Random seed for synthetic mode.
     """
     if source == "pyshark":
-        return PysharkCapture(interface=interface)
+        return PysharkCapture(interface=interface, promiscuous=promiscuous)
     if source == "scapy":
         return ScapyCapture(interface=interface)
     if source == "synthetic":

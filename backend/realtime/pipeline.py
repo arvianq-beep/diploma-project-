@@ -37,6 +37,7 @@ from collections import deque
 from dataclasses import asdict, dataclass
 from typing import Any, Deque, Iterator
 
+from llm_service import enqueue_llm_artifacts
 from storage import insert_report
 
 from .capture import BaseCapture, make_capture_source
@@ -104,6 +105,7 @@ class StreamResult:
             "verification_checks": self.verification_checks,
             "verification_summary": self.verification_summary,
             "report_id": self.report_id,
+            "explanation_pending": self.report_id is not None,
         }
 
 
@@ -155,6 +157,7 @@ class StreamMonitor:
         flow_timeout_s: float = 30.0,
         console_output: bool = True,
         result_buffer_size: int = 1000,
+        promiscuous: bool = False,
     ) -> None:
         if isinstance(source, str):
             self._capture: BaseCapture = make_capture_source(
@@ -163,6 +166,7 @@ class StreamMonitor:
                 rate_limit=rate_limit,
                 attack_ratio=attack_ratio,
                 seed=seed,
+                promiscuous=promiscuous,
             )
         else:
             self._capture = source
@@ -222,6 +226,8 @@ class StreamMonitor:
     def stop(self) -> None:
         """Signal threads to stop and wait for clean shutdown."""
         self._running.clear()
+        # Interrupt blocking capture loops (pyshark/scapy/synthetic).
+        self._capture.stop()
         try:
             self._flow_queue.put_nowait(_STOP_SENTINEL)
         except queue.Full:
@@ -337,12 +343,19 @@ class StreamMonitor:
             try:
                 item = self._flow_queue.get(timeout=0.1)
             except queue.Empty:
+                if not self._running.is_set():
+                    break  # stop() called and queue is fully drained
                 item = None
 
             if item is _STOP_SENTINEL:
-                if batch:
+                # Natural end of capture → flush remaining batch.
+                # Explicit stop (_running cleared) → discard to avoid logging after stop.
+                if batch and self._running.is_set():
                     self._process_batch(batch)
                 break
+
+            if not self._running.is_set():
+                continue  # drain queue without logging when stopped explicitly
 
             if item is not None:
                 batch.append(item)  # type: ignore[arg-type]
@@ -356,9 +369,6 @@ class StreamMonitor:
                 self._process_batch(batch)
                 batch = []
                 last_flush = now
-
-        if not self._running.is_set() and batch:
-            self._process_batch(batch)
 
     # ------------------------------------------------------------------
     # Batch inference
@@ -467,6 +477,25 @@ class StreamMonitor:
                         "proto": result.proto,
                     },
                 )
+                if result.report_id is not None and ver_details:
+                    enqueue_llm_artifacts(
+                        result.report_id,
+                        {
+                            "src_ip": result.src_ip,
+                            "dst_ip": result.dst_ip,
+                            "src_port": result.src_port,
+                            "dst_port": result.dst_port,
+                            "protocol": result.proto,
+                        },
+                        ver_details,
+                        result.final_status,
+                        result.verification_confidence,
+                        {
+                            "label": result.detector_label,
+                            "confidence": result.detector_confidence,
+                            "triggered_indicators": result.triggered_indicators,
+                        },
+                    )
             except Exception:
                 pass  # DB failure must not break the realtime stream
 

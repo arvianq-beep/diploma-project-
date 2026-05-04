@@ -26,13 +26,8 @@ class DashboardScreen extends StatelessWidget {
       padding: const EdgeInsets.all(20),
       children: [
         Text(
-          'AI-driven IDS with Verification Layer',
+          'AI model for Secure Decision-Making in Cyber Threat Detection Systems',
           style: Theme.of(context).textTheme.headlineMedium,
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'This prototype separates raw AI prediction from the final security verdict by adding a deterministic verification layer.',
-          style: Theme.of(context).textTheme.bodyLarge,
         ),
         const SizedBox(height: 20),
         GridView.count(

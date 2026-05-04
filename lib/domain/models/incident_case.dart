@@ -16,6 +16,8 @@ class IncidentCase {
   final String? aiExplanation;
   /// LLM-generated investigation recommendations. Populated only for Suspicious incidents.
   final String? aiRecommendations;
+  /// True when Ollama was reachable at analysis time and explanation is being generated.
+  final bool explanationPending;
 
   const IncidentCase({
     required this.event,
@@ -26,6 +28,7 @@ class IncidentCase {
     this.reportId,
     this.aiExplanation,
     this.aiRecommendations,
+    this.explanationPending = false,
   });
 
   IncidentCase copyWith({
@@ -37,6 +40,7 @@ class IncidentCase {
     int? reportId,
     String? aiExplanation,
     String? aiRecommendations,
+    bool? explanationPending,
   }) {
     return IncidentCase(
       event: event ?? this.event,
@@ -47,6 +51,7 @@ class IncidentCase {
       reportId: reportId ?? this.reportId,
       aiExplanation: aiExplanation ?? this.aiExplanation,
       aiRecommendations: aiRecommendations ?? this.aiRecommendations,
+      explanationPending: explanationPending ?? this.explanationPending,
     );
   }
 }

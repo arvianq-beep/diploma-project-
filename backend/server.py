@@ -184,190 +184,9 @@ def _normalize_event(event_payload: dict, fallback_id: str | None = None) -> dic
 
 
 # ---------------------------------------------------------------------------
-# LLM explanation (Ollama) — generated asynchronously after each analysis.
+# LLM explanation (Ollama) — see llm_service.py for implementation.
 # ---------------------------------------------------------------------------
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
-OLLAMA_TIMEOUT_SEC = float(os.getenv("OLLAMA_TIMEOUT_SEC", "60"))
-
-_EXPLANATION_PROMPT_TEMPLATE = """You are a cybersecurity analyst assistant.
-
-Convert the structured intrusion detection results below into a short, clear, human-readable explanation.
-
-RULES:
-- Do NOT invent facts.
-- Use ONLY the provided data.
-- Be concise (2-4 sentences max).
-- Explain WHY the system made this decision.
-- Highlight key signals (features, anomalies, checks).
-- If uncertainty is high, explicitly say so.
-
-INPUT DATA:
-- status: {status}
-- probability: {probability}
-- uncertainty: {uncertainty}
-- checks: {checks}
-- perturbation_analysis: {perturbation}
-- feature_importance: {feature_importance}
-
-OUTPUT: plain text only, 2-4 sentences."""
-
-
-def _build_explanation_prompt(
-    status: str,
-    probability: float,
-    verification_details: dict,
-) -> str:
-    uncertainty = verification_details.get("uncertainty") or {}
-    checks_raw = verification_details.get("checks") or []
-    perturbation = verification_details.get("perturbation_analysis") or {}
-    feature_importance = (verification_details.get("feature_importance") or {}).get("top_5") or []
-
-    checks_summary = [
-        {
-            "title": c.get("title"),
-            "passed": c.get("passed"),
-            "score": round(float(c.get("score", 0.0)), 3),
-        }
-        for c in checks_raw
-    ]
-    perturbation_summary = {
-        k: perturbation.get(k)
-        for k in ("label_consistency_ratio", "confidence_drop", "mean_confidence", "std_confidence")
-        if k in perturbation
-    }
-
-    return _EXPLANATION_PROMPT_TEMPLATE.format(
-        status=status,
-        probability=f"{float(probability):.4f}",
-        uncertainty=json.dumps(uncertainty, ensure_ascii=False),
-        checks=json.dumps(checks_summary, ensure_ascii=False),
-        perturbation=json.dumps(perturbation_summary, ensure_ascii=False),
-        feature_importance=json.dumps(feature_importance, ensure_ascii=False),
-    )
-
-
-def _ollama_complete(prompt: str) -> str:
-    """POST a prompt to Ollama and return the response text. Raises on failure."""
-    import urllib.request
-
-    body = json.dumps(
-        {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        OLLAMA_URL,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT_SEC) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
-    return (payload.get("response") or "").strip()
-
-
-_RECOMMENDATIONS_PROMPT_TEMPLATE = """You are a senior cybersecurity analyst.
-
-The intrusion detection system has marked this event as "Suspicious".
-The system is uncertain and could not make a confident decision.
-
-Your task is to provide clear, practical investigation steps.
-
-STRICT RULES:
-- Do NOT invent any facts.
-- Use ONLY the provided data.
-- Do NOT repeat the raw input.
-- Focus on WHAT actions should be taken next.
-- Be concise and practical.
-- Avoid generic advice like "investigate further".
-- If uncertainty is high, explicitly mention it.
-
-INPUT DATA:
-- protocol: {protocol}
-- ports: {ports}
-- probability: {probability}
-- uncertainty: {uncertainty}
-- anomaly_score: {anomaly_score}
-- behavioral_flags: {flags}
-- failed_checks: {failed_checks}
-- perturbation_analysis: {perturbation}
-- feature_importance: {feature_importance}
-
-OUTPUT FORMAT:
-- 3 to 5 bullet points
-- Each bullet = one actionable step
-- Max 12 words per bullet"""
-
-
-def _build_recommendations_prompt(
-    probability: float,
-    event: dict,
-    verification_details: dict,
-) -> str:
-    uncertainty = verification_details.get("uncertainty") or {}
-    checks_raw = verification_details.get("checks") or []
-    failed_checks = [
-        {"title": c.get("title"), "score": round(float(c.get("score", 0.0)), 3)}
-        for c in checks_raw
-        if not c.get("passed")
-    ]
-    event_context = verification_details.get("event_context") or {}
-    flags = {
-        k: event_context.get(k)
-        for k in ("known_bad_source", "off_hours_activity", "repeated_attempts")
-        if k in event_context
-    }
-    perturbation = verification_details.get("perturbation_analysis") or {}
-    perturbation_summary = {
-        k: perturbation.get(k)
-        for k in ("label_consistency_ratio", "confidence_drop", "mean_confidence", "std_confidence")
-        if k in perturbation
-    }
-    feature_importance = (verification_details.get("feature_importance") or {}).get("top_5") or []
-
-    ports = {
-        "source": event.get("source_port"),
-        "destination": event.get("destination_port"),
-    }
-
-    return _RECOMMENDATIONS_PROMPT_TEMPLATE.format(
-        protocol=event.get("protocol") or "unknown",
-        ports=json.dumps(ports, ensure_ascii=False),
-        probability=f"{float(probability):.4f}",
-        uncertainty=json.dumps(uncertainty, ensure_ascii=False),
-        anomaly_score=event.get("anomaly_score"),
-        flags=json.dumps(flags, ensure_ascii=False),
-        failed_checks=json.dumps(failed_checks, ensure_ascii=False),
-        perturbation=json.dumps(perturbation_summary, ensure_ascii=False),
-        feature_importance=json.dumps(feature_importance, ensure_ascii=False),
-    )
-
-
-def _generate_llm_artifacts(
-    report_id: int,
-    event: dict,
-    verification_details: dict,
-    status: str,
-    probability: float,
-) -> None:
-    """Generate explanation always, plus recommendations when status == Suspicious. Silent on failure."""
-    try:
-        explanation = _ollama_complete(
-            _build_explanation_prompt(status, probability, verification_details)
-        )
-        if explanation:
-            update_report_explanation(report_id, explanation)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[ollama] explanation for report {report_id} failed: {exc}", file=sys.stderr)
-
-    if status == "Suspicious":
-        try:
-            recommendations = _ollama_complete(
-                _build_recommendations_prompt(probability, event, verification_details)
-            )
-            if recommendations:
-                update_report_recommendations(report_id, recommendations)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[ollama] recommendations for report {report_id} failed: {exc}", file=sys.stderr)
+from llm_service import enqueue_llm_artifacts, ollama_reachable
 
 
 def _analysis_response(event_payload: dict) -> dict:
@@ -408,6 +227,9 @@ def _analysis_response(event_payload: dict) -> dict:
         },
     }
 
+    llm_available = ollama_reachable()
+    response["explanation_pending"] = llm_available
+
     report_id = insert_report(
         event_id=normalized_event["id"],
         label=detector_output.label,
@@ -439,17 +261,15 @@ def _analysis_response(event_payload: dict) -> dict:
     )
     response["report_id"] = report_id
 
-    threading.Thread(
-        target=_generate_llm_artifacts,
-        args=(
+    if llm_available:
+        enqueue_llm_artifacts(
             report_id,
             normalized_event,
             verification.verification_details,
             verification.final_decision_status,
             verification.verification_confidence,
-        ),
-        daemon=True,
-    ).start()
+            response["prediction"],
+        )
 
     return response
 
@@ -903,6 +723,7 @@ def realtime_start():
         batch_size = int(body.get("batch_size", 32))
         rate_limit = float(body.get("rate_limit", 0.05))
         attack_ratio = float(body.get("attack_ratio", 0.3))
+        promiscuous = _safe_bool(body.get("promiscuous", False))
 
         if source not in ("pyshark", "scapy", "synthetic"):
             return jsonify({"error": f"Unknown source '{source}'. Choose: pyshark, scapy, synthetic."}), 400
@@ -916,6 +737,7 @@ def realtime_start():
                 attack_ratio=attack_ratio,
                 batch_size=batch_size,
                 console_output=True,
+                promiscuous=promiscuous,
             )
             _set_monitor(m)
             t = threading.Thread(target=m.start, kwargs={"blocking": True}, daemon=True)

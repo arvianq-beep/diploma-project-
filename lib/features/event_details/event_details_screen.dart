@@ -103,6 +103,7 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
   void _maybeStartAiPolling() {
     final reportId = widget.incident.reportId;
     if (reportId == null || _aiComplete) return;
+    if (!widget.incident.explanationPending) return;
     _aiLoading = true;
     _aiPollTimer = Timer.periodic(_aiPollInterval, (_) => _pollAiAnalysis());
     // Trigger an immediate first attempt so we don't wait the full interval.
@@ -173,7 +174,6 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
       (item) => item.event.id == widget.incident.event.id,
       orElse: () => widget.incident,
     );
-    final report = widget.controller.reportForIncident(incident);
 
     return Scaffold(
       appBar: AppBar(title: const Text('Event details')),
@@ -309,105 +309,193 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
           ),
           const SizedBox(height: 16),
 
-          // ── Analyst verdict ────────────────────────────────────────────────
-          SectionCard(
-            title: 'Analyst verdict',
-            subtitle: incident.reportId != null
-                ? 'Report #${incident.reportId} — select your verdict to train the model.'
-                : 'This incident was not saved to the database (offline mode).',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (_feedbackSubmitted) ...[
-                  _SubmittedBanner(verdict: _selectedVerdict!),
-                  const SizedBox(height: 16),
-                ],
+          // ── Analyst verdict (collapsible, closed by default) ───────────────
+          Builder(builder: (context) {
+            final theme = Theme.of(context);
+            final submittedOption = _feedbackSubmitted && _selectedVerdict != null
+                ? _verdicts.firstWhere((v) => v.value == _selectedVerdict)
+                : null;
+            final tileColor = submittedOption?.color ?? theme.colorScheme.outline;
 
-                // 4 verdict buttons in a 2×2 grid
-                GridView.count(
-                  crossAxisCount: 2,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  crossAxisSpacing: 10,
-                  mainAxisSpacing: 10,
-                  childAspectRatio: 2.8,
-                  children: _verdicts.map((v) {
-                    final selected = _selectedVerdict == v.value;
-                    return _VerdictButton(
-                      option: v,
-                      selected: selected,
-                      disabled: _feedbackSubmitted || incident.reportId == null,
-                      onTap: () => setState(() => _selectedVerdict = v.value),
-                    );
-                  }).toList(),
-                ),
-                const SizedBox(height: 16),
-
-                // Notes field
-                TextField(
-                  controller: _notesController,
-                  minLines: 2,
-                  maxLines: 4,
-                  enabled: !_feedbackSubmitted,
-                  decoration: const InputDecoration(
-                    labelText: 'Analyst notes (optional)',
-                    hintText: 'Add context, false-positive reason, or escalation note.',
+            return Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: tileColor.withValues(alpha: 0.22)),
+                color: tileColor.withValues(alpha: 0.05),
+              ),
+              child: Theme(
+                data: theme.copyWith(dividerColor: Colors.transparent),
+                child: ExpansionTile(
+                  initiallyExpanded: false,
+                  tilePadding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 4),
+                  childrenPadding:
+                      const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  expandedCrossAxisAlignment: CrossAxisAlignment.start,
+                  leading: Icon(
+                    submittedOption != null
+                        ? Icons.check_circle
+                        : Icons.rate_review_outlined,
+                    color: tileColor,
+                    size: 22,
                   ),
-                ),
-                const SizedBox(height: 14),
-
-                // Action buttons
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
+                  title: Text(
+                    'Analyst verdict',
+                    style: theme.textTheme.titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                  subtitle: Text(
+                    submittedOption != null
+                        ? 'Submitted: ${submittedOption.label}'
+                        : incident.reportId != null
+                            ? 'Report #${incident.reportId} — tap to open'
+                            : 'Offline mode — tap to add notes',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: tileColor,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (submittedOption != null)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: tileColor.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                                color: tileColor.withValues(alpha: 0.3)),
+                          ),
+                          child: Text(
+                            submittedOption.label,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: tileColor,
+                            ),
+                          ),
+                        ),
+                      const Icon(Icons.expand_more, size: 18),
+                    ],
+                  ),
                   children: [
-                    FilledButton.icon(
-                      onPressed: _feedbackSubmitted ||
-                              _feedbackSubmitting ||
-                              _selectedVerdict == null ||
-                              incident.reportId == null
-                          ? null
-                          : _submitFeedback,
-                      icon: _feedbackSubmitting
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.send_outlined),
-                      label: Text(
-                        _feedbackSubmitted ? 'Verdict submitted' : 'Submit verdict',
-                      ),
-                    ),
-                    FilledButton.icon(
-                      onPressed: () {
-                        widget.controller.saveAnalystNotes(
-                          incident: incident,
-                          analystName: 'SOC Analyst',
-                          notes: _notesController.text,
+                    if (_feedbackSubmitted) ...[
+                      _SubmittedBanner(verdict: _selectedVerdict!),
+                      const SizedBox(height: 16),
+                    ],
+
+                    // 4 verdict buttons in a 2×2 grid
+                    GridView.count(
+                      crossAxisCount: 2,
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 10,
+                      childAspectRatio: 2.8,
+                      children: _verdicts.map((v) {
+                        final selected = _selectedVerdict == v.value;
+                        return _VerdictButton(
+                          option: v,
+                          selected: selected,
+                          disabled: _feedbackSubmitted ||
+                              incident.reportId == null,
+                          onTap: () =>
+                              setState(() => _selectedVerdict = v.value),
                         );
-                        _showSnack('Analyst notes saved.');
-                      },
-                      icon: const Icon(Icons.save_outlined),
-                      label: const Text('Save notes'),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Theme.of(context).colorScheme.secondary,
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Notes field
+                    TextField(
+                      controller: _notesController,
+                      minLines: 2,
+                      maxLines: 4,
+                      enabled: !_feedbackSubmitted,
+                      decoration: const InputDecoration(
+                        labelText: 'Analyst notes (optional)',
+                        hintText:
+                            'Add context, false-positive reason, or escalation note.',
                       ),
                     ),
-                    OutlinedButton.icon(
-                      onPressed: report == null
-                          ? null
-                          : () async {
-                              await widget.controller.exportReport(report);
-                            },
-                      icon: const Icon(Icons.picture_as_pdf_outlined),
-                      label: const Text('Export PDF'),
+                    const SizedBox(height: 14),
+
+                    // Action buttons
+                    Wrap(
+                      spacing: 12,
+                      runSpacing: 12,
+                      children: [
+                        FilledButton.icon(
+                          onPressed: _feedbackSubmitted ||
+                                  _feedbackSubmitting ||
+                                  _selectedVerdict == null ||
+                                  incident.reportId == null
+                              ? null
+                              : _submitFeedback,
+                          icon: _feedbackSubmitting
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2),
+                                )
+                              : const Icon(Icons.send_outlined),
+                          label: Text(
+                            _feedbackSubmitted
+                                ? 'Verdict submitted'
+                                : 'Submit verdict',
+                          ),
+                        ),
+                        FilledButton.icon(
+                          onPressed: () {
+                            widget.controller.saveAnalystNotes(
+                              incident: incident,
+                              analystName: 'SOC Analyst',
+                              notes: _notesController.text,
+                            );
+                            setState(() {});
+                            _showSnack('Analyst notes saved.');
+                          },
+                          icon: const Icon(Icons.save_outlined),
+                          label: const Text('Save notes'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor:
+                                theme.colorScheme.secondary,
+                          ),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () async {
+                            widget.controller.saveAnalystNotes(
+                              incident: incident,
+                              analystName: 'SOC Analyst',
+                              notes: _notesController.text,
+                            );
+                            final latestIncident =
+                                widget.controller.history.firstWhere(
+                              (item) =>
+                                  item.event.id == widget.incident.event.id,
+                              orElse: () => widget.incident,
+                            );
+                            final latestReport = widget.controller
+                                .reportForIncident(latestIncident);
+                            if (latestReport != null) {
+                              await widget.controller
+                                  .exportReport(latestReport);
+                            }
+                          },
+                          icon: const Icon(Icons.picture_as_pdf_outlined),
+                          label: const Text('Export PDF'),
+                        ),
+                      ],
                     ),
                   ],
                 ),
-              ],
-            ),
-          ),
+              ),
+            );
+          }),
         ],
       ),
     );
@@ -627,12 +715,33 @@ class _MetaChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC),
+        color: const Color(0xFFEFF4FB),
         borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFF2A7ABF).withValues(alpha: 0.18)),
       ),
-      child: Text('$label: $value'),
+      child: RichText(
+        text: TextSpan(
+          children: [
+            TextSpan(
+              text: '$label: ',
+              style: const TextStyle(
+                fontSize: 12,
+                color: Color(0xFF4B5E7A),
+              ),
+            ),
+            TextSpan(
+              text: value,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF0B1220),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
