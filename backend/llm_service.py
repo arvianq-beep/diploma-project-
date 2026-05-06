@@ -22,41 +22,45 @@ OLLAMA_TIMEOUT_SEC = float(os.getenv("OLLAMA_TIMEOUT_SEC", "60"))
 # Prompt templates
 # ---------------------------------------------------------------------------
 
-_EXPLANATION_PROMPT_TEMPLATE = """You are explaining a network security alert to a security analyst. Write 2-3 clear sentences in plain English.
+_EXPLANATION_PROMPT_TEMPLATE = """Summarise this network security alert for an analyst. Write exactly 2-3 sentences in plain English.
 
-Focus on: what kind of traffic was seen, whether it looks dangerous or safe, and how confident the system is.
-Avoid: raw numbers, technical parameter names, model jargon. Use words like "high confidence", "unusual pattern", "looks safe".
-Do NOT start with "I", "As a", "The system", or "Based on". Start directly with the finding.
+Structure:
+- Sentence 1: what was detected and the final verdict.
+- Sentence 2: the main reason — one or two specific signals that drove the conclusion.
+- Sentence 3 (only if needed): note any uncertainty or what made the case borderline.
 
-Detection result: {status}
-Traffic type detected: {detector_label} (confidence: {detector_confidence})
-Key warning signs: {triggered_indicators}
-Verification verdict: {verification_summary}
-Confidence level: {certain}
-Most important signals: {top_signals}
-Checks passed/failed:
-{checks_detail}
+Strict rules — violating any of these makes the output unusable:
+1. Do NOT start with "I", "The system", "As a", "Based on", or "This alert".
+2. Do NOT add any closing phrase: no "feel free to ask", no "let me know", no "I hope this helps", no "if you need more", no "please don't hesitate". The analysis ends with the last sentence, full stop.
+3. Do NOT use raw variable names or jargon: write "high packet rate" not "flow_packets_per_s", write "traffic volume" not "bytes_transferred_kb".
+4. Output nothing except the 2-3 sentences.
 
-Write 2-3 sentences. Plain English only. No bullet points. No technical terms."""
+Alert data:
+Verdict: {status}
+Detected as: {detector_label} (detector confidence: {detector_confidence})
+Warning signs: {triggered_indicators}
+Verification summary: {verification_summary}
+Overall confidence: {certain}
+Key traffic signals: {top_signals}
+Verification checks:
+{checks_detail}"""
 
-_RECOMMENDATIONS_PROMPT_TEMPLATE = """A network event was flagged as SUSPICIOUS and needs analyst investigation. Give 3-5 specific action items.
+_RECOMMENDATIONS_PROMPT_TEMPLATE = """Write a numbered list of 3-5 investigation steps for this suspicious network event.
 
-Rules:
-- Each item starts with a verb (Check, Block, Inspect, Review, Verify)
-- Max 15 words per item
-- Be specific — use the IP addresses, ports, and indicators provided
-- No generic advice like "monitor the network" or "review security policies"
-- No intro sentence, no preamble, just the list
+Strict rules — violating any of these makes the output unusable:
+1. Start each step with an action verb: Check, Block, Inspect, Verify, Review, Isolate, Correlate.
+2. Use the actual IPs, ports, and threat type from the data — be specific, not generic.
+3. Maximum 15 words per step.
+4. Do NOT write any introduction, conclusion, or closing remark. Output ONLY the numbered list — nothing before step 1, nothing after the last step.
+5. No "feel free to ask", no "let me know", no "I hope this helps". The list is the complete output.
 
-Event details:
-- Source: {src_ip}:{src_port} → Destination: {dst_ip}:{dst_port} ({protocol})
-- Threat type: {detector_label}
-- Warning signs: {triggered_indicators}
-- Context flags: {flags}
-- Checks that failed: {failed_checks}
-- Top contributing signals: {top_signals}
-
-Output: numbered list of 3-5 action items only."""
+Event data:
+Source: {src_ip}:{src_port} → {dst_ip}:{dst_port} ({protocol})
+Threat type: {detector_label}
+Warning signs: {triggered_indicators}
+Active flags: {flags}
+Failed checks: {failed_checks}
+Key signals: {top_signals}"""
 
 
 # ---------------------------------------------------------------------------
