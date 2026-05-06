@@ -22,31 +22,41 @@ OLLAMA_TIMEOUT_SEC = float(os.getenv("OLLAMA_TIMEOUT_SEC", "60"))
 # Prompt templates
 # ---------------------------------------------------------------------------
 
-_EXPLANATION_PROMPT_TEMPLATE = """Summarise this IDS result in 2-3 sentences. Write like a log entry: direct, factual, no filler.
-Rules: no "As a...", no "I would", no "it is worth noting", no hedging. Start with the verdict.
+_EXPLANATION_PROMPT_TEMPLATE = """You are explaining a network security alert to a security analyst. Write 2-3 clear sentences in plain English.
 
-Stage 1 · RF Detector: {detector_label} (conf={detector_confidence}) indicators={triggered_indicators}
-Stage 2 · Verdict: {status} score={verification_score} certain={certain}
-Summary: {verification_summary}
-Checks:
+Focus on: what kind of traffic was seen, whether it looks dangerous or safe, and how confident the system is.
+Avoid: raw numbers, technical parameter names, model jargon. Use words like "high confidence", "unusual pattern", "looks safe".
+Do NOT start with "I", "As a", "The system", or "Based on". Start directly with the finding.
+
+Detection result: {status}
+Traffic type detected: {detector_label} (confidence: {detector_confidence})
+Key warning signs: {triggered_indicators}
+Verification verdict: {verification_summary}
+Confidence level: {certain}
+Most important signals: {top_signals}
+Checks passed/failed:
 {checks_detail}
-std={uncertainty_std} consistency={consistency} drop={confidence_drop}
-Top signals: {top_signals}
 
-OUTPUT: 2-3 plain sentences, no bullet points, no intro phrases."""
+Write 2-3 sentences. Plain English only. No bullet points. No technical terms."""
 
-_RECOMMENDATIONS_PROMPT_TEMPLATE = """Event is SUSPICIOUS. List 3-5 investigation steps based ONLY on the data below.
-Rules: bullets only, max 12 words each, no intro, no "I would", no generic advice like "monitor the network".
+_RECOMMENDATIONS_PROMPT_TEMPLATE = """A network event was flagged as SUSPICIOUS and needs analyst investigation. Give 3-5 specific action items.
 
-Traffic: {src_ip}:{src_port} -> {dst_ip}:{dst_port} proto={protocol}
-Detector: {detector_label} conf={detector_confidence} anomaly={anomaly_score}
-Indicators: {triggered_indicators}
-Flags: {flags}
-Failed checks: {failed_checks}
-score={verification_score} std={uncertainty_std} consistency={consistency} drop={confidence_drop}
-Top signals: {top_signals}
+Rules:
+- Each item starts with a verb (Check, Block, Inspect, Review, Verify)
+- Max 15 words per item
+- Be specific — use the IP addresses, ports, and indicators provided
+- No generic advice like "monitor the network" or "review security policies"
+- No intro sentence, no preamble, just the list
 
-OUTPUT: bullet list only, no preamble."""
+Event details:
+- Source: {src_ip}:{src_port} → Destination: {dst_ip}:{dst_port} ({protocol})
+- Threat type: {detector_label}
+- Warning signs: {triggered_indicators}
+- Context flags: {flags}
+- Checks that failed: {failed_checks}
+- Top contributing signals: {top_signals}
+
+Output: numbered list of 3-5 action items only."""
 
 
 # ---------------------------------------------------------------------------
@@ -66,26 +76,25 @@ def _build_explanation_prompt(
     top_5 = (verification_details.get("feature_importance") or {}).get("top_5") or []
 
     checks_detail = "\n".join(
-        f"  {'✓' if c.get('passed') else '✗'} {c.get('title', '?')}"
-        f"  score={round(float(c.get('score', 0)), 2)}"
-        f"  weight={round(float(c.get('weight', 1.0)), 2)}"
-        f"  evidence={'; '.join((c.get('evidence') or [])[:2]) or 'n/a'}"
+        f"  {'PASS' if c.get('passed') else 'FAIL'}: {c.get('title', '?')}"
         for c in checks_raw
     ) or "  n/a"
     top_signals = ", ".join(
-        f"{f['feature']} ({'+' if f['attribution'] >= 0 else ''}{round(f['attribution'], 2)})"
+        f['feature'].replace("_", " ")
         for f in top_5
     ) or "n/a"
     triggered = det.get("triggered_indicators") or []
+    is_uncertain = uncertainty.get("is_uncertain", False)
+    confidence_pct = int(float(det.get("confidence", 0.0)) * 100)
 
     return _EXPLANATION_PROMPT_TEMPLATE.format(
         detector_label=det.get("label", "unknown"),
-        detector_confidence=f"{float(det.get('confidence', 0.0)):.3f}",
-        triggered_indicators=", ".join(triggered) if triggered else "none",
+        detector_confidence=f"{confidence_pct}%",
+        triggered_indicators=", ".join(triggered) if triggered else "none detected",
         status=status,
         verification_score=f"{float(probability):.3f}",
         verification_summary=verification_details.get("summary", "n/a"),
-        certain=str(not uncertainty.get("is_uncertain", False)),
+        certain="high confidence" if not is_uncertain else "uncertain — needs analyst review",
         checks_detail=checks_detail,
         uncertainty_std=round(float(uncertainty.get("std_deviation", 0.0)), 3),
         consistency=round(float(perturbation.get("label_consistency_ratio", 0.0)), 2),
