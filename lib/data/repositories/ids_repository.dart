@@ -211,14 +211,26 @@ class IdsRepository {
     );
   }
 
-  /// Fetch the LLM-generated AI fields for a report.
-  /// Returns nulls when the backend has not yet finished generating.
-  Future<({String? aiExplanation, String? aiRecommendations})>
+  Future<int> fetchFeedbackCount() async {
+    try {
+      return await _apiService.fetchFeedbackCount();
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<Map<String, dynamic>> triggerFineTune() {
+    return _apiService.triggerFineTune();
+  }
+
+  /// Fetch AI fields and analyst verdict for a report.
+  /// Returns nulls when the backend has not yet finished generating or has no verdict.
+  Future<({String? aiExplanation, String? aiRecommendations, String? analystVerdict, String? analystNotes})>
       fetchReportAiAnalysis(int reportId) async {
     try {
       return await _apiService.fetchReportAiAnalysis(reportId);
     } catch (_) {
-      return (aiExplanation: null, aiRecommendations: null);
+      return (aiExplanation: null, aiRecommendations: null, analystVerdict: null, analystNotes: null);
     }
   }
 }

@@ -1,15 +1,117 @@
 import 'package:diploma_application_ml/features/home/app_controller.dart';
 import 'package:diploma_application_ml/shared/widgets/section_card.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-class SettingsScreen extends StatelessWidget {
+const kAnalystNameKey = 'analyst_name';
+
+class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key, required this.controller});
 
   final AppController controller;
 
   @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  final TextEditingController _nameController = TextEditingController();
+
+  int? _feedbackCount;
+  bool _feedbackLoading = false;
+  bool _retraining = false;
+  String? _retrainResult;
+  bool _retrainError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAnalystName();
+    _loadFeedbackCount();
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadAnalystName() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getString(kAnalystNameKey) ?? '';
+    if (mounted) setState(() => _nameController.text = stored);
+  }
+
+  Future<void> _saveAnalystName(String name) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (name.trim().isEmpty) {
+      await prefs.remove(kAnalystNameKey);
+    } else {
+      await prefs.setString(kAnalystNameKey, name.trim());
+    }
+  }
+
+  Future<void> _loadFeedbackCount() async {
+    setState(() => _feedbackLoading = true);
+    try {
+      final count = await widget.controller.repository.fetchFeedbackCount();
+      if (mounted) setState(() => _feedbackCount = count);
+    } catch (_) {
+      if (mounted) setState(() => _feedbackCount = 0);
+    } finally {
+      if (mounted) setState(() => _feedbackLoading = false);
+    }
+  }
+
+  Future<void> _triggerRetrain() async {
+    setState(() {
+      _retraining = true;
+      _retrainResult = null;
+      _retrainError = false;
+    });
+    try {
+      final result = await widget.controller.repository.triggerFineTune();
+      if (!mounted) return;
+      final status = result['status'] as String? ?? '';
+      if (status == 'ok') {
+        final samples = result['feedback_samples'] as int? ?? 0;
+        final replay = result['replay_samples'] as int? ?? 0;
+        final driftStatus =
+            (result['drift'] as Map?)?['status'] as String? ?? 'n/a';
+        setState(() {
+          _retrainResult =
+              'Done — trained on $samples feedback + $replay replay samples. '
+              'Drift: $driftStatus.';
+          _retrainError = false;
+        });
+      } else {
+        final reason = result['reason'] as String? ?? 'skipped';
+        final found = result['found'] as int?;
+        final required = result['required'] as int?;
+        setState(() {
+          _retrainResult = reason == 'too_few_feedback_samples' && found != null
+              ? 'Skipped — only $found verdicts found, $required required.'
+              : 'Skipped: $reason.';
+          _retrainError = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _retrainResult = 'Error: $e';
+          _retrainError = true;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _retraining = false);
+      _loadFeedbackCount();
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final modelInfo = controller.modelInfo;
+    final theme = Theme.of(context);
+    final modelInfo = widget.controller.modelInfo;
     final detectorMetrics =
         (modelInfo.metrics['detector'] as Map?)?.cast<String, dynamic>() ?? {};
     final verifierMetrics =
@@ -27,14 +129,144 @@ class SettingsScreen extends StatelessWidget {
       children: [
         Text(
           'About the prototype',
-          style: Theme.of(context).textTheme.headlineMedium,
+          style: theme.textTheme.headlineMedium,
         ),
         const SizedBox(height: 8),
         Text(
           'This screen explains the thesis framing, ML module and verification-first architecture for the defense.',
-          style: Theme.of(context).textTheme.bodyLarge,
+          style: theme.textTheme.bodyLarge,
         ),
         const SizedBox(height: 20),
+
+        // ── Analyst identity ───────────────────────────────────────────────
+        SectionCard(
+          title: 'Analyst identity',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Your name is shown on saved analyst notes and exported reports.',
+                style: theme.textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Display name',
+                  hintText: 'SOC Analyst',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                textInputAction: TextInputAction.done,
+                onSubmitted: _saveAnalystName,
+                onEditingComplete: () =>
+                    _saveAnalystName(_nameController.text),
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton.icon(
+                  onPressed: () {
+                    _saveAnalystName(_nameController.text);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Analyst name saved.')),
+                    );
+                  },
+                  icon: const Icon(Icons.save_outlined, size: 16),
+                  label: const Text('Save'),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // ── Model feedback & retraining ────────────────────────────────────
+        SectionCard(
+          title: 'Model feedback & retraining',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Analyst verdicts submitted from Event Details are stored in the '
+                'backend database and used to fine-tune the verifier ensemble.',
+                style: theme.textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  const Icon(Icons.rate_review_outlined, size: 18),
+                  const SizedBox(width: 8),
+                  _feedbackLoading
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Text(
+                          'Stored verdicts: ${_feedbackCount ?? 0}',
+                          style: theme.textTheme.bodyMedium
+                              ?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                  const Spacer(),
+                  IconButton(
+                    onPressed: _feedbackLoading ? null : _loadFeedbackCount,
+                    icon: const Icon(Icons.refresh, size: 18),
+                    tooltip: 'Refresh count',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _retraining ? null : _triggerRetrain,
+                icon: _retraining
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.model_training, size: 18),
+                label: Text(_retraining ? 'Retraining…' : 'Trigger retraining'),
+              ),
+              if (_retrainResult != null) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: (_retrainError
+                            ? Colors.red
+                            : theme.colorScheme.primary)
+                        .withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: (_retrainError
+                              ? Colors.red
+                              : theme.colorScheme.primary)
+                          .withValues(alpha: 0.3),
+                    ),
+                  ),
+                  child: Text(
+                    _retrainResult!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: _retrainError
+                          ? Colors.red
+                          : theme.colorScheme.primary,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // ── Thesis goal ────────────────────────────────────────────────────
         const SectionCard(
           title: 'Thesis goal',
           child: Text(
@@ -150,7 +382,7 @@ class SettingsScreen extends StatelessWidget {
             modelInfo.modelAvailable
                 ? 'The app is connected to the Python pipeline and receives backend-side detector plus verifier decisions.'
                 : 'The backend integration is ready, but a trained detector artifact was not found at runtime. The app can still fall back to the local heuristic demo path so the diploma presentation remains runnable.',
-            style: Theme.of(context).textTheme.bodyLarge,
+            style: theme.textTheme.bodyLarge,
           ),
         ),
       ],

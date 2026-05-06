@@ -49,6 +49,12 @@ class AppController extends ChangeNotifier {
   int _realtimeBenignCount = 0;
   Timer? _realtimePoller;
 
+  final StreamController<RealtimeEvent> _threatAlertController =
+      StreamController<RealtimeEvent>.broadcast();
+
+  /// Emits each new Verified Threat event as it arrives during real-time monitoring.
+  Stream<RealtimeEvent> get threatAlerts => _threatAlertController.stream;
+
   int get tabIndex => _tabIndex;
   bool get initializing => _initializing;
   bool get isAnalyzing => _isAnalyzing;
@@ -322,6 +328,9 @@ class AppController extends ChangeNotifier {
           } else {
             _realtimeBenignCount++;
           }
+          if (e.isVerifiedThreat) {
+            _threatAlertController.add(e);
+          }
           // Convert to IncidentCase so Dashboard/Analysis/Reports update automatically
           final incident = _realtimeEventToIncident(e);
           _history.insert(0, incident);
@@ -459,6 +468,7 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _realtimePoller?.cancel();
+    _threatAlertController.close();
     super.dispose();
   }
 

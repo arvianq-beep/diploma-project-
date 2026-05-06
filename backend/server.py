@@ -464,10 +464,21 @@ def verifier_metadata():
 def report_feedback(report_id: int):
     """Record analyst verdict for a stored report.
 
-    Body: { "verdict": "confirmed_threat|confirmed_benign|false_positive|false_negative",
-            "notes": "optional free text" }
+    Request body:
+      { "verdict": "confirmed_threat" | "confirmed_benign" | "false_positive" | "false_negative",
+        "notes": "<optional free text>" }
 
-    This is the primary data source for online learning.
+    Response (200):
+      { "status": "ok", "report_id": int, "verdict": str }
+
+    Response (400): unknown verdict value.
+    Response (404): report_id not found.
+
+    Stores verdict + notes + reviewed_at timestamp in the reports table.
+    This endpoint is the primary data source for online fine-tuning via
+    POST /api/v1/ml/verifier/fine-tune.
+
+    # Thesis Table 10 amendment — add to Section 3.5
     """
     body = request.get_json(silent=True) or {}
     verdict = body.get("verdict", "")
@@ -483,9 +494,43 @@ def report_feedback(report_id: int):
     return jsonify({"status": "ok", "report_id": report_id, "verdict": verdict}), 200
 
 
+@app.get("/api/v1/ml/verifier/feedback-stats")
+def verifier_feedback_stats():
+    """Return analyst feedback statistics used by the online-learning UI.
+
+    Response: { "total_feedback": int }
+
+    total_feedback — total analyst verdicts stored in the reports table.
+    Used by the Settings screen to show how many samples are available for fine-tuning.
+
+    # Thesis Table 10 amendment — add to Section 3.5
+    """
+    conn = get_conn()
+    total = conn.execute(
+        "SELECT COUNT(*) FROM reports WHERE analyst_verdict IS NOT NULL"
+    ).fetchone()[0]
+    conn.close()
+    return jsonify({"total_feedback": int(total)})
+
+
 @app.post("/api/v1/ml/verifier/fine-tune")
 def verifier_fine_tune():
-    """Fine-tune the verifier ensemble on recent confirmed reports from reports.db."""
+    """Fine-tune the verifier ensemble on recent confirmed reports from reports.db.
+
+    Optional body: { "hours": int, "min_samples": int, "epochs": int, "learning_rate": float }
+    Defaults: hours=24, min_samples=50, epochs=3, learning_rate=1e-4.
+
+    Response on success:
+      { "status": "ok", "feedback_samples": int, "replay_samples": int,
+        "total_training_samples": int, "epochs": int, "drift": { ... } }
+    Response when skipped:
+      { "status": "skipped", "reason": "too_few_feedback_samples" | "no_artifact", ... }
+
+    Reloads the verifier in-process after a successful fine-tune so new weights
+    are used immediately without a restart.
+
+    # Thesis Table 10 amendment — add to Section 3.5
+    """
     from verification.online_learning import fine_tune
     body = request.get_json(silent=True) or {}
     result = fine_tune(

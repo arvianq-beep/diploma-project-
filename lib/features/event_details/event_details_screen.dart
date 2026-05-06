@@ -5,10 +5,13 @@ import 'package:diploma_application_ml/data/repositories/ids_repository.dart';
 import 'package:diploma_application_ml/domain/models/final_decision_status.dart';
 import 'package:diploma_application_ml/domain/models/incident_case.dart';
 import 'package:diploma_application_ml/features/home/app_controller.dart';
+import 'package:diploma_application_ml/features/settings/settings_screen.dart'
+    show kAnalystNameKey;
 import 'package:diploma_application_ml/shared/widgets/section_card.dart';
 import 'package:diploma_application_ml/shared/widgets/status_badge.dart';
 import 'package:diploma_application_ml/shared/widgets/verification_check_tile.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // Allowed verdicts with their display labels, icons, and colors.
 const _verdicts = [
@@ -71,6 +74,12 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
   Timer? _aiPollTimer;
   int _aiPollAttempts = 0;
 
+  // Whether we are currently loading the previously-submitted verdict from backend.
+  bool _verdictLoading = false;
+
+  // Analyst display name loaded from SharedPreferences.
+  String _analystName = 'SOC Analyst';
+
   static const _aiPollInterval = Duration(seconds: 2);
   static const _aiPollMaxAttempts = 30; // ~60 s ceiling
 
@@ -83,6 +92,43 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
     _aiExplanation = widget.incident.aiExplanation;
     _aiRecommendations = widget.incident.aiRecommendations;
     _maybeStartAiPolling();
+    _loadExistingVerdict();
+    _loadAnalystName();
+  }
+
+  Future<void> _loadAnalystName() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getString(kAnalystNameKey) ?? '';
+    if (mounted && stored.isNotEmpty) {
+      setState(() => _analystName = stored);
+    }
+  }
+
+  /// Fetch the previously-submitted analyst verdict from the backend (if any)
+  /// and pre-populate the UI so the analyst sees their earlier decision.
+  Future<void> _loadExistingVerdict() async {
+    final reportId = widget.incident.reportId;
+    if (reportId == null) return;
+    setState(() => _verdictLoading = true);
+    try {
+      final result = await widget.repository.fetchReportAiAnalysis(reportId);
+      if (!mounted) return;
+      final verdict = result.analystVerdict;
+      final notes = result.analystNotes;
+      if (verdict != null && _verdicts.any((v) => v.value == verdict)) {
+        setState(() {
+          _selectedVerdict = verdict;
+          _feedbackSubmitted = true;
+          if (notes != null && notes.isNotEmpty) {
+            _notesController.text = notes;
+          }
+        });
+      }
+    } catch (_) {
+      // Silently ignore — verdict is non-critical
+    } finally {
+      if (mounted) setState(() => _verdictLoading = false);
+    }
   }
 
   @override
@@ -345,11 +391,13 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
                         ?.copyWith(fontWeight: FontWeight.w600),
                   ),
                   subtitle: Text(
-                    submittedOption != null
-                        ? 'Submitted: ${submittedOption.label}'
-                        : incident.reportId != null
-                            ? 'Report #${incident.reportId} — tap to open'
-                            : 'Offline mode — tap to add notes',
+                    _verdictLoading
+                        ? 'Loading verdict...'
+                        : submittedOption != null
+                            ? 'Submitted: ${submittedOption.label}'
+                            : incident.reportId != null
+                                ? 'Report #${incident.reportId} — tap to open'
+                                : 'Offline mode — tap to add notes',
                     style: TextStyle(
                       fontSize: 12,
                       color: tileColor,
@@ -453,7 +501,7 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
                           onPressed: () {
                             widget.controller.saveAnalystNotes(
                               incident: incident,
-                              analystName: 'SOC Analyst',
+                              analystName: _analystName,
                               notes: _notesController.text,
                             );
                             setState(() {});
@@ -470,7 +518,7 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
                           onPressed: () async {
                             widget.controller.saveAnalystNotes(
                               incident: incident,
-                              analystName: 'SOC Analyst',
+                              analystName: _analystName,
                               notes: _notesController.text,
                             );
                             final latestIncident =

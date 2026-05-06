@@ -177,13 +177,13 @@ class IdsApiService {
   /// `aiExplanation` is populated for every analyzed report.
   /// `aiRecommendations` is populated only for reports with status `Suspicious`.
   /// Both fields may be `null` for a few seconds after analysis while Ollama is generating.
-  Future<({String? aiExplanation, String? aiRecommendations})>
+  Future<({String? aiExplanation, String? aiRecommendations, String? analystVerdict, String? analystNotes})>
       fetchReportAiAnalysis(int reportId) async {
     final response = await _client.get(
       Uri.parse('$baseUrl/api/v1/reports/$reportId'),
     );
     if (response.statusCode == 404) {
-      return (aiExplanation: null, aiRecommendations: null);
+      return (aiExplanation: null, aiRecommendations: null, analystVerdict: null, analystNotes: null);
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('Fetch report failed: ${response.statusCode}');
@@ -192,6 +192,8 @@ class IdsApiService {
     return (
       aiExplanation: _nullIfEmpty(data['ai_explanation']),
       aiRecommendations: _nullIfEmpty(data['ai_recommendations']),
+      analystVerdict: _nullIfEmpty(data['analyst_verdict']),
+      analystNotes: _nullIfEmpty(data['analyst_notes']),
     );
   }
 
@@ -502,6 +504,30 @@ class IdsApiService {
     } catch (e) {
       throw Exception('Failed to fetch $source interfaces: $e');
     }
+  }
+
+  /// Returns how many analyst verdicts are stored in the backend DB.
+  Future<int> fetchFeedbackCount() async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl/api/v1/ml/verifier/feedback-stats'),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) return 0;
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    return (data['total_feedback'] as num?)?.toInt() ?? 0;
+  }
+
+  /// Trigger online fine-tuning of the verifier ensemble.
+  /// Returns the raw result dict from the backend (status, samples, drift, etc.).
+  Future<Map<String, dynamic>> triggerFineTune() async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/api/v1/ml/verifier/fine-tune'),
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Fine-tune failed: ${response.statusCode}');
+    }
+    return (jsonDecode(response.body) as Map<String, dynamic>?) ?? {};
   }
 
   /// Fetch monitor status without draining results.
