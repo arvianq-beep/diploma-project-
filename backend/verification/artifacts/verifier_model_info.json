@@ -19,7 +19,7 @@
     "calibration": "platt_scaling"
   },
   "threshold": 0.9,
-  "threat_threshold": 0.3,
+  "threat_threshold": 0.6396,
   "benign_threshold": 0.9,
   "input_features": [
     "duration_seconds_norm",
@@ -58,7 +58,7 @@
   ],
   "training_sources": [
     "cic_ids2017_held_out",
-    "unsw_nb15_augmented"
+    "unsw_nb15_held_out"
   ],
   "detector_training_mode": "trained-detector-artifact",
   "label_generation": {

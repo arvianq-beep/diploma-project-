@@ -151,6 +151,14 @@ class IdsRepository {
     );
   }
 
+  Future<List<IncidentCase>> fetchReports({
+    int limit = 1000,
+    DateTime? from,
+    DateTime? to,
+  }) async {
+    return _apiService.fetchReports(limit: limit, from: from, to: to);
+  }
+
   ReportModel buildReport(IncidentCase incident) =>
       _fallbackRepository.buildReport(incident);
 

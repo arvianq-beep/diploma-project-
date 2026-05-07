@@ -98,6 +98,26 @@ def train(cic_path: str, unsw_path: str | None = None) -> dict:
         X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
     )
 
+    # NOTE: test_size=0.2 and random_state=42 must match train_verifier.py UNSW split.
+    unsw_test_bundle: DatasetBundle | None = None
+    if unsw_path:
+        unsw_bundle = load_dataset_bundle(unsw_path, "unsw_nb15_augmented")
+        unsw_train_frame, unsw_test_frame, y_unsw_train, y_unsw_test = train_test_split(
+            unsw_bundle.frame, unsw_bundle.labels, test_size=0.2, random_state=42, stratify=unsw_bundle.labels
+        )
+        X_train = pd.concat([X_train, unsw_train_frame[CANONICAL_FEATURES]], ignore_index=True)
+        y_train = pd.concat([y_train, y_unsw_train], ignore_index=True)
+        unsw_test_bundle = DatasetBundle(
+            frame=unsw_test_frame.reset_index(drop=True),
+            labels=y_unsw_test.reset_index(drop=True),
+            dataset_name="unsw_nb15_held_out",
+            source_files=unsw_bundle.source_files,
+            dataset_audit=unsw_bundle.dataset_audit,
+            rows_before_dedup=len(unsw_test_frame),
+            rows_after_dedup=len(unsw_test_frame),
+            merged_duplicates_removed=0,
+        )
+
     pipeline = build_pipeline()
     pipeline.fit(X_train, y_train)
 
@@ -132,9 +152,8 @@ def train(cic_path: str, unsw_path: str | None = None) -> dict:
         "test_rows": int(len(X_test)),
     }
 
-    if unsw_path:
-        unsw_bundle = load_dataset_bundle(unsw_path, "unsw_nb15_augmented")
-        results["cross_dataset"] = evaluate_bundle(pipeline, unsw_bundle)
+    if unsw_test_bundle is not None:
+        results["cross_dataset"] = evaluate_bundle(pipeline, unsw_test_bundle)
 
     dump(pipeline, MODEL_PATH)
 

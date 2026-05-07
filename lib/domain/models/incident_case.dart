@@ -18,6 +18,10 @@ class IncidentCase {
   final String? aiRecommendations;
   /// True when Ollama was reachable at analysis time and explanation is being generated.
   final bool explanationPending;
+  /// True when the CUSUM sudden-drift detector has fired on the analysis stream.
+  final bool suddenDriftActive;
+  /// Operator-facing recommendation text when sudden drift is active.
+  final String? suddenDriftRecommendation;
 
   const IncidentCase({
     required this.event,
@@ -29,6 +33,8 @@ class IncidentCase {
     this.aiExplanation,
     this.aiRecommendations,
     this.explanationPending = false,
+    this.suddenDriftActive = false,
+    this.suddenDriftRecommendation,
   });
 
   IncidentCase copyWith({
@@ -41,6 +47,8 @@ class IncidentCase {
     String? aiExplanation,
     String? aiRecommendations,
     bool? explanationPending,
+    bool? suddenDriftActive,
+    String? suddenDriftRecommendation,
   }) {
     return IncidentCase(
       event: event ?? this.event,
@@ -52,6 +60,9 @@ class IncidentCase {
       aiExplanation: aiExplanation ?? this.aiExplanation,
       aiRecommendations: aiRecommendations ?? this.aiRecommendations,
       explanationPending: explanationPending ?? this.explanationPending,
+      suddenDriftActive: suddenDriftActive ?? this.suddenDriftActive,
+      suddenDriftRecommendation:
+          suddenDriftRecommendation ?? this.suddenDriftRecommendation,
     );
   }
 }

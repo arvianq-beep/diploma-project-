@@ -12,11 +12,19 @@ import sys
 import threading
 from typing import Any
 
-from storage import update_report_explanation, update_report_recommendations
+from storage import (
+    get_recent_events_by_ip,
+    update_report_correlation_note,
+    update_report_explanation,
+    update_report_recommendations,
+)
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 OLLAMA_TIMEOUT_SEC = float(os.getenv("OLLAMA_TIMEOUT_SEC", "60"))
+
+CORRELATION_WINDOW_MINUTES = int(os.getenv("CORRELATION_WINDOW_MINUTES", "10"))
+CORRELATION_MIN_EVENTS = int(os.getenv("CORRELATION_MIN_EVENTS", "3"))
 
 # ---------------------------------------------------------------------------
 # Prompt templates
@@ -61,6 +69,28 @@ Warning signs: {triggered_indicators}
 Active flags: {flags}
 Failed checks: {failed_checks}
 Key signals: {top_signals}"""
+
+
+_CORRELATION_PROMPT_TEMPLATE = """Analyse this cluster of network events from one source IP. Write exactly 2-3 sentences.
+
+Rules — violating any makes the output unusable:
+1. Start with the source IP, event count, and time window.
+2. Identify the pattern: port scan, brute-force, C2 beacon, data exfil, or inconclusive.
+3. End with a threat urgency level: low / medium / high.
+4. Do NOT write "I", "The system", "Based on", or any closing phrase.
+5. Output only the 2-3 sentences — nothing else.
+
+Source IP: {src_ip}
+Events in last {window_minutes} min: {event_count}
+Time span: {time_span}s
+Verdicts: {status_summary}
+Destination ports: {dst_ports}
+Confidence range: {conf_min}%→{conf_max}%
+Indicators across all events: {all_indicators}
+Event timeline:
+{events_detail}
+
+OUTPUT: 2-3 sentences only."""
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +184,65 @@ def _build_recommendations_prompt(
     )
 
 
+def _build_correlation_prompt(src_ip: str, events: list[dict], window_minutes: int) -> str:
+    from datetime import datetime as _dt
+
+    statuses = [e.get("final_status") or "Unknown" for e in events]
+    status_counts: dict[str, int] = {}
+    for s in statuses:
+        status_counts[s] = status_counts.get(s, 0) + 1
+    status_summary = ", ".join(f"{cnt}× {st}" for st, cnt in status_counts.items())
+
+    dst_ports = sorted({
+        str((e.get("event_snapshot") or {}).get("destination_port", ""))
+        for e in events
+        if (e.get("event_snapshot") or {}).get("destination_port")
+    })
+
+    confidences = [float(e.get("confidence") or 0.0) for e in events]
+    conf_min = int(min(confidences) * 100)
+    conf_max = int(max(confidences) * 100)
+
+    seen_indicators: set[str] = set()
+    all_indicators: list[str] = []
+    for e in events:
+        for ind in ((e.get("detector_output") or {}).get("triggered_indicators") or []):
+            if ind not in seen_indicators:
+                all_indicators.append(ind)
+                seen_indicators.add(ind)
+
+    timestamps = [e.get("created_at") or "" for e in events]
+    try:
+        t0 = _dt.fromisoformat(timestamps[0].replace("Z", "+00:00"))
+        t1 = _dt.fromisoformat(timestamps[-1].replace("Z", "+00:00"))
+        time_span = int((t1 - t0).total_seconds())
+    except Exception:
+        time_span = 0
+
+    lines = []
+    for e in events:
+        snap = e.get("event_snapshot") or {}
+        lines.append(
+            f"  {(e.get('created_at') or '')[:19]}"
+            f" | {(e.get('final_status') or '?'):20s}"
+            f" | port={snap.get('destination_port', '?')}"
+            f" conf={int(float(e.get('confidence') or 0) * 100)}%"
+        )
+
+    return _CORRELATION_PROMPT_TEMPLATE.format(
+        src_ip=src_ip,
+        window_minutes=window_minutes,
+        event_count=len(events),
+        time_span=time_span,
+        status_summary=status_summary,
+        dst_ports=", ".join(dst_ports) if dst_ports else "unknown",
+        conf_min=conf_min,
+        conf_max=conf_max,
+        all_indicators=", ".join(all_indicators) if all_indicators else "none",
+        events_detail="\n".join(lines),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Ollama HTTP client
 # ---------------------------------------------------------------------------
@@ -219,6 +308,21 @@ def generate_llm_artifacts(
             print(f"[ollama] recommendations for report {report_id} failed: {exc}", file=sys.stderr)
 
 
+def generate_correlation_note(
+    report_id: int,
+    src_ip: str,
+    events: list[dict[str, Any]],
+    window_minutes: int,
+) -> None:
+    """Generate and persist a cross-event correlation note. Silent on failure."""
+    try:
+        note = _ollama_complete(_build_correlation_prompt(src_ip, events, window_minutes))
+        if note:
+            update_report_correlation_note(report_id, note)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ollama] correlation for report {report_id} failed: {exc}", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Worker queue — one daemon thread, one Ollama request at a time
 # ---------------------------------------------------------------------------
@@ -230,7 +334,11 @@ def _llm_worker() -> None:
     while True:
         task = _llm_queue.get()
         try:
-            generate_llm_artifacts(*task)
+            task_type, *args = task
+            if task_type == "artifacts":
+                generate_llm_artifacts(*args)
+            elif task_type == "correlation":
+                generate_correlation_note(*args)
         finally:
             _llm_queue.task_done()
 
@@ -246,5 +354,22 @@ def enqueue_llm_artifacts(
     probability: float,
     detector_output: dict[str, Any] | None = None,
 ) -> None:
-    """Put an LLM generation task on the queue. Returns immediately."""
-    _llm_queue.put((report_id, event, verification_details, status, probability, detector_output))
+    """Put an LLM artifacts task on the queue. Returns immediately."""
+    _llm_queue.put(("artifacts", report_id, event, verification_details, status, probability, detector_output))
+
+
+def enqueue_correlation_check(report_id: int, src_ip: str) -> bool:
+    """Query recent events for src_ip; enqueue correlation if threshold is met.
+
+    Returns True if a correlation task was queued.
+    Threshold: CORRELATION_MIN_EVENTS events in CORRELATION_WINDOW_MINUTES, at least 1 non-benign.
+    """
+    if not src_ip or src_ip in ("0.0.0.0", "?", "unknown"):
+        return False
+    events = get_recent_events_by_ip(src_ip, minutes=CORRELATION_WINDOW_MINUTES)
+    if len(events) < CORRELATION_MIN_EVENTS:
+        return False
+    if not any(e.get("final_status") != "Benign" for e in events):
+        return False
+    _llm_queue.put(("correlation", report_id, src_ip, events, CORRELATION_WINDOW_MINUTES))
+    return True

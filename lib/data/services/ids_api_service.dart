@@ -144,6 +144,9 @@ class IdsApiService {
           (data['recommended_action'] ?? status.analystAction).toString(),
     );
 
+    final suddenDrift =
+        (data['sudden_drift'] as Map?)?.cast<String, dynamic>() ?? {};
+
     return IncidentCase(
       event: event,
       analysis: analysis,
@@ -153,6 +156,8 @@ class IdsApiService {
       aiExplanation: _nullIfEmpty(data['ai_explanation']),
       aiRecommendations: _nullIfEmpty(data['ai_recommendations']),
       explanationPending: data['explanation_pending'] == true,
+      suddenDriftActive: suddenDrift['drift_active'] == true,
+      suddenDriftRecommendation: _nullIfEmpty(suddenDrift['recommendation']),
       analystReview: AnalystReview(
         state: status == FinalDecisionStatus.suspicious
             ? AnalystReviewState.pending
@@ -170,6 +175,138 @@ class IdsApiService {
     if (value == null) return null;
     final s = value.toString().trim();
     return s.isEmpty ? null : s;
+  }
+
+  /// Fetch all reports from the backend and convert them to IncidentCase objects.
+  Future<List<IncidentCase>> fetchReports({
+    int limit = 1000,
+    DateTime? from,
+    DateTime? to,
+  }) async {
+    final params = <String, String>{'limit': '$limit'};
+    if (from != null) params['from'] = from.toUtc().toIso8601String();
+    if (to != null) params['to'] = to.toUtc().toIso8601String();
+    final uri = Uri.parse('$baseUrl/api/v1/reports').replace(queryParameters: params);
+    final response = await _client.get(uri);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Fetch reports failed: ${response.statusCode}');
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final items = ((data['items'] as List?) ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    return items.map(_incidentFromReportRow).toList();
+  }
+
+  IncidentCase _incidentFromReportRow(Map<String, dynamic> row) {
+    final snap = (row['event_snapshot'] as Map<String, dynamic>?) ?? {};
+    final detOut = (row['detector_output'] as Map<String, dynamic>?) ?? {};
+    final verOut = (row['verification_output'] as Map<String, dynamic>?) ?? {};
+    final verDet =
+        (verOut['verification_details'] as Map<String, dynamic>?) ?? {};
+    final finDec = (row['final_decision'] as Map<String, dynamic>?) ?? {};
+
+    final capturedAt =
+        DateTime.tryParse(snap['captured_at']?.toString() ?? '') ??
+        DateTime.tryParse(row['created_at']?.toString() ?? '') ??
+        DateTime.now();
+
+    final event = ThreatEvent(
+      id: (snap['id'] ?? row['event_id'] ?? '').toString(),
+      title: (snap['title'] ?? 'Event #${row['id']}').toString(),
+      description: (snap['description'] ?? '').toString(),
+      sourceIp: (snap['source_ip'] ?? '0.0.0.0').toString(),
+      destinationIp: (snap['destination_ip'] ?? '0.0.0.0').toString(),
+      sourcePort: (snap['source_port'] as num?)?.toInt() ?? 0,
+      destinationPort: (snap['destination_port'] as num?)?.toInt() ?? 0,
+      protocol: (snap['protocol'] ?? 'UNKNOWN').toString(),
+      bytesTransferredKb:
+          (snap['bytes_transferred_kb'] as num?)?.toDouble() ?? 0,
+      durationSeconds: (snap['duration_seconds'] as num?)?.toDouble() ?? 0,
+      packetsPerSecond: (snap['packets_per_second'] as num?)?.toDouble() ?? 0,
+      failedLogins: (snap['failed_logins'] as num?)?.toInt() ?? 0,
+      anomalyScore: (snap['anomaly_score'] as num?)?.toDouble() ?? 0,
+      contextRiskScore: (snap['context_risk_score'] as num?)?.toDouble() ?? 0,
+      knownBadSource: snap['known_bad_source'] == true,
+      offHoursActivity: snap['off_hours_activity'] == true,
+      repeatedAttempts: snap['repeated_attempts'] == true,
+      sampleSource: (snap['sample_source'] ?? 'Backend API').toString(),
+      capturedAt: capturedAt,
+      tags: ((snap['tags'] as List?) ?? const [])
+          .map((t) => t.toString())
+          .toList(),
+    );
+
+    final analysis = AnalysisResult(
+      rawAiLabel:
+          (detOut['label'] ?? row['label'] ?? 'Unknown').toString(),
+      rawConfidence: (detOut['confidence'] as num?)?.toDouble() ??
+          (row['confidence'] as num?)?.toDouble() ??
+          0,
+      stabilityScore: (detOut['stability_score'] as num?)?.toDouble() ?? 0,
+      modelVersion: (detOut['model_version'] ?? 'unknown').toString(),
+      reasoning: (detOut['reasoning'] ?? '').toString(),
+      alternativeHypothesis:
+          (detOut['alternative_hypothesis'] ?? '').toString(),
+      triggeredIndicators:
+          ((detOut['triggered_indicators'] as List?) ?? const [])
+              .map((t) => t.toString())
+              .toList(),
+    );
+
+    final verConf =
+        (verOut['verification_confidence'] as num?)?.toDouble() ?? 0;
+    final isVerified = verOut['is_verified'] == true;
+    final checks = _buildVerificationChecks(verDet);
+
+    final verification = VerificationResult(
+      checks: checks,
+      passed: isVerified,
+      verificationScore: verConf,
+      explanationNotes: ['Loaded from backend report history.'],
+      summary: (verDet['summary'] ?? '').toString(),
+    );
+
+    final finalStatusStr =
+        (row['final_status'] ?? finDec['status'] ?? 'Suspicious').toString();
+    final status = _statusFromLabel(finalStatusStr);
+
+    final finalDecision = FinalDecision(
+      rawAiLabel: analysis.rawAiLabel,
+      rawConfidence: analysis.rawConfidence,
+      verificationChecks: checks,
+      status: status,
+      explanation: verification.summary,
+      timestamp: capturedAt,
+      recommendedAnalystAction: (row['recommended_action'] ??
+              finDec['recommended_action'] ??
+              status.analystAction)
+          .toString(),
+    );
+
+    final analystVerdict = _nullIfEmpty(row['analyst_verdict']);
+    return IncidentCase(
+      event: event,
+      analysis: analysis,
+      verification: verification,
+      finalDecision: finalDecision,
+      reportId: (row['id'] as num?)?.toInt(),
+      aiExplanation: _nullIfEmpty(row['ai_explanation']),
+      aiRecommendations: _nullIfEmpty(row['ai_recommendations']),
+      explanationPending: false,
+      analystReview: AnalystReview(
+        state: analystVerdict != null
+            ? AnalystReviewState.reviewed
+            : (status == FinalDecisionStatus.suspicious
+                ? AnalystReviewState.pending
+                : AnalystReviewState.reviewed),
+        analystName: 'SOC Analyst',
+        notes: _nullIfEmpty(row['analyst_notes']) ?? '',
+        updatedAt:
+            DateTime.tryParse(row['analyst_reviewed_at']?.toString() ?? '') ??
+            capturedAt,
+      ),
+    );
   }
 
   /// Fetch the asynchronously-generated AI fields for a report.
@@ -522,7 +659,15 @@ class IdsApiService {
     final response = await _client.post(
       Uri.parse('$baseUrl/api/v1/ml/verifier/fine-tune'),
       headers: {'Content-Type': 'application/json'},
-      body: '{}',
+      // hours=8760 — look back 1 year so old verdicts are included.
+      // min_samples=5 — allow fine-tuning with small feedback sets.
+      // epochs=15, learning_rate=5e-4 — enough to actually shift decision boundary.
+      body: jsonEncode({
+        'hours': 8760,
+        'min_samples': 5,
+        'epochs': 15,
+        'learning_rate': 5e-4,
+      }),
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('Fine-tune failed: ${response.statusCode}');

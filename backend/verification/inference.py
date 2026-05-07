@@ -178,13 +178,13 @@ class SecureDecisionVerificationService:
     def _estimate_uncertainty(self, vector: list[float]) -> dict[str, float]:
         if self.bundle is None:
             return {"mean": 0.5, "std": 0.0, "min": 0.5, "max": 0.5, "uncertain": False}
-        return self.bundle.predict_with_uncertainty(vector, n_samples=30)
+        return self.bundle.predict_with_uncertainty(vector, n_samples=10)
 
     def _compute_feature_importance(self, vector: list[float]) -> dict[str, float]:
         if self.bundle is None:
             return {}
         try:
-            return self.bundle.feature_importance(vector, steps=50)
+            return self.bundle.feature_importance(vector, steps=15)
         except Exception:
             return {}
 
@@ -222,7 +222,7 @@ class SecureDecisionVerificationService:
         pert_passed = label_consistency >= 0.74 and confidence_drop <= 0.18
         alignment = feature_bundle.support_alignment_score
         uncertainty_score = max(0.0, min(1.0, 1.0 - uncertainty.get("std", 0.0) * 5.0))
-        mc_samples = 30
+        mc_samples = 10
 
         checks = [
             {
@@ -258,7 +258,7 @@ class SecureDecisionVerificationService:
                     f"Mean probability: {round(uncertainty.get('mean', probability), 4)}",
                     f"Std deviation: {round(uncertainty.get('std', 0.0), 4)}",
                     f"Uncertain: {'yes — routed to analyst' if uncertainty.get('uncertain') else 'no'}",
-                    f"MC passes: {mc_samples} × {ensemble_members} models",
+                    f"MC passes: {mc_samples} × {ensemble_members} models (fast-path)",
                 ],
             },
             {
@@ -327,7 +327,7 @@ class SecureDecisionVerificationService:
                 "mean_probability": round(uncertainty.get("mean", probability), 4),
                 "std_deviation": round(uncertainty.get("std", 0.0), 4),
                 "is_uncertain": uncertainty.get("uncertain", False),
-                "mc_samples": 30,
+                "mc_samples": 10,
                 "ensemble_members": len(self.bundle.models) if self.bundle else 0,
             },
             "feature_importance": {

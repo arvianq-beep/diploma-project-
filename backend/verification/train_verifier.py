@@ -366,7 +366,25 @@ def train_verifier(
             merged_duplicates_removed=0,
         ))
     if unsw_path:
-        bundles.append(load_dataset_bundle(unsw_path, "unsw_nb15_augmented"))
+        full_unsw = load_dataset_bundle(unsw_path, "unsw_nb15_augmented")
+        # NOTE: test_size=0.2 and random_state=42 must match train_model.py UNSW split.
+        _, unsw_test_frame, _, unsw_test_labels = train_test_split(
+            full_unsw.frame,
+            full_unsw.labels,
+            test_size=0.2,
+            random_state=42,
+            stratify=full_unsw.labels,
+        )
+        bundles.append(DatasetBundle(
+            frame=unsw_test_frame.reset_index(drop=True),
+            labels=unsw_test_labels.reset_index(drop=True),
+            dataset_name="unsw_nb15_held_out",
+            source_files=full_unsw.source_files,
+            dataset_audit=full_unsw.dataset_audit,
+            rows_before_dedup=len(unsw_test_frame),
+            rows_after_dedup=len(unsw_test_frame),
+            merged_duplicates_removed=0,
+        ))
     if not bundles:
         bundles.append(build_bootstrap_dataset(sample_count=bootstrap_samples, seed=seed))
 

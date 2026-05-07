@@ -338,6 +338,14 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
             const SizedBox(height: 16),
           ],
 
+          // ── Concept-drift warning ─────────────────────────────────────────
+          if (incident.suddenDriftActive) ...[
+            _DriftWarningBanner(
+              recommendation: incident.suddenDriftRecommendation,
+            ),
+            const SizedBox(height: 16),
+          ],
+
           // ── Final decision ─────────────────────────────────────────────────
           SectionCard(
             title: 'Final decision',
@@ -748,6 +756,56 @@ class _AiAnalysisBody extends StatelessWidget {
           ),
         ],
       ],
+    );
+  }
+}
+
+// ── Concept-drift warning banner ──────────────────────────────────────────────
+
+class _DriftWarningBanner extends StatelessWidget {
+  const _DriftWarningBanner({this.recommendation});
+
+  final String? recommendation;
+
+  @override
+  Widget build(BuildContext context) {
+    const amber = Color(0xFFD97706);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: amber.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: amber.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.warning_amber_rounded, color: amber, size: 22),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Concept drift detected',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: amber,
+                  ),
+                ),
+                if (recommendation != null && recommendation!.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    recommendation!,
+                    style: const TextStyle(fontSize: 12, color: amber),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

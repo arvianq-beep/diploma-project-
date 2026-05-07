@@ -16,6 +16,9 @@ class RealtimeEvent {
     required this.triggeredIndicators,
     required this.verificationChecks,
     required this.verificationSummary,
+    required this.bytesTransferredKb,
+    required this.durationSeconds,
+    required this.packetsPerSecond,
     this.reportId,
     this.explanationPending = false,
   });
@@ -36,6 +39,9 @@ class RealtimeEvent {
   /// Raw JSON dicts for each of the 5 verification checks from Stage 2.
   final List<Map<String, dynamic>> verificationChecks;
   final String verificationSummary;
+  final double bytesTransferredKb;
+  final double durationSeconds;
+  final double packetsPerSecond;
   final int? reportId;
   final bool explanationPending;
 
@@ -73,6 +79,12 @@ class RealtimeEvent {
               .toList(),
       verificationSummary:
           (json['verification_summary'] ?? '').toString(),
+      bytesTransferredKb:
+          (json['bytes_transferred_kb'] as num?)?.toDouble() ?? 0.0,
+      durationSeconds:
+          (json['duration_seconds'] as num?)?.toDouble() ?? 0.0,
+      packetsPerSecond:
+          (json['packets_per_second'] as num?)?.toDouble() ?? 0.0,
       reportId: (json['report_id'] as num?)?.toInt(),
       explanationPending: json['explanation_pending'] == true,
     );

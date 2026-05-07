@@ -237,9 +237,14 @@ class _StatsRow extends StatelessWidget {
             color: Theme.of(context).colorScheme.primary,
           ),
           _StatChip(
-            label: 'Threats',
+            label: 'Verified Threats',
             value: '${controller.realtimeThreatCount}',
             color: palette.verifiedThreat,
+          ),
+          _StatChip(
+            label: 'Suspicious',
+            value: '${controller.realtimeSuspiciousCount}',
+            color: palette.suspicious,
           ),
           _StatChip(
             label: 'Benign',

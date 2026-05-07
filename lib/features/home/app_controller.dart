@@ -41,11 +41,16 @@ class AppController extends ChangeNotifier {
   MlModelInfo _modelInfo = MlModelInfo.fallback();
   BatchAnalysisSummary? _lastBatchSummary;
 
-  // Real-time monitoring state
+  // Reports filter state
+  bool _reportsLoading = false;
+  DateTime? _filterFrom;
+  DateTime? _filterTo;
+
   bool _realtimeRunning = false;
   String _realtimeSource = 'synthetic';
   final List<RealtimeEvent> _realtimeEvents = [];
   int _realtimeThreatCount = 0;
+  int _realtimeSuspiciousCount = 0;
   int _realtimeBenignCount = 0;
   Timer? _realtimePoller;
 
@@ -72,11 +77,29 @@ class AppController extends ChangeNotifier {
   MlModelInfo get modelInfo => _modelInfo;
   BatchAnalysisSummary? get lastBatchSummary => _lastBatchSummary;
 
+  bool get reportsLoading => _reportsLoading;
+  DateTime? get filterFrom => _filterFrom;
+  DateTime? get filterTo => _filterTo;
+  bool get hasDateFilter => _filterFrom != null || _filterTo != null;
+
+  void setDateFilter({DateTime? from, DateTime? to}) {
+    _filterFrom = from;
+    _filterTo = to;
+    notifyListeners();
+  }
+
+  void clearDateFilter() {
+    _filterFrom = null;
+    _filterTo = null;
+    notifyListeners();
+  }
+
   // Real-time getters
   bool get realtimeRunning => _realtimeRunning;
   String get realtimeSource => _realtimeSource;
   List<RealtimeEvent> get realtimeEvents => List.unmodifiable(_realtimeEvents);
   int get realtimeThreatCount => _realtimeThreatCount;
+  int get realtimeSuspiciousCount => _realtimeSuspiciousCount;
   int get realtimeBenignCount => _realtimeBenignCount;
 
   Future<List<({String value, String label})>> fetchRealtimeInterfaces(
@@ -98,6 +121,58 @@ class AppController extends ChangeNotifier {
     _initializing = false;
     notifyListeners();
     unawaited(_loadModelInfo());
+  }
+
+  Future<void> loadReportsFromBackend() async {
+    if (_reportsLoading) return;
+    _reportsLoading = true;
+    notifyListeners();
+    try {
+      final fetched = await _repository.fetchReports(
+        from: _filterFrom,
+        to: _filterTo,
+      );
+
+      // Build a lookup: reportId → index in the current _reports list.
+      final existingIdx = <int, int>{};
+      for (var i = 0; i < _reports.length; i++) {
+        final id = _reports[i].incident.reportId;
+        if (id != null) existingIdx[id] = i;
+      }
+
+      // Separate fetched into updates (already in list) and new arrivals.
+      final toUpdate = <int, IncidentCase>{}; // index → fresh incident
+      final toAdd    = <IncidentCase>[];
+
+      for (final incident in fetched) {
+        final id = incident.reportId;
+        if (id != null && existingIdx.containsKey(id)) {
+          toUpdate[existingIdx[id]!] = incident;
+        } else {
+          toAdd.add(incident);
+        }
+      }
+
+      // Apply in-place updates (refreshes AI fields that arrived after creation).
+      toUpdate.forEach((idx, incident) {
+        _reports[idx] = _repository.buildReport(incident);
+        final hIdx = _history.indexWhere((h) => h.reportId == incident.reportId);
+        if (hIdx != -1) _history[hIdx] = incident;
+      });
+
+      // Prepend genuinely new reports at the top.
+      for (final incident in toAdd.reversed) {
+        _history.insert(0, incident);
+        _reports.insert(0, _repository.buildReport(incident));
+      }
+
+      if (_history.isNotEmpty) _latestIncident = _history.first;
+    } catch (e) {
+      _error = e.toString();
+    } finally {
+      _reportsLoading = false;
+      notifyListeners();
+    }
   }
 
   void setTabIndex(int value) {
@@ -282,6 +357,7 @@ class AppController extends ChangeNotifier {
     _realtimeSource = source;
     _realtimeEvents.clear();
     _realtimeThreatCount = 0;
+    _realtimeSuspiciousCount = 0;
     _realtimeBenignCount = 0;
     notifyListeners();
 
@@ -323,8 +399,10 @@ class AppController extends ChangeNotifier {
           _realtimeEvents.removeRange(500, _realtimeEvents.length);
         }
         for (final e in events) {
-          if (e.isThreat) {
+          if (e.finalStatus == 'Verified Threat') {
             _realtimeThreatCount++;
+          } else if (e.finalStatus == 'Suspicious') {
+            _realtimeSuspiciousCount++;
           } else {
             _realtimeBenignCount++;
           }
@@ -379,9 +457,9 @@ class AppController extends ChangeNotifier {
       sourcePort: e.srcPort,
       destinationPort: e.dstPort,
       protocol: proto,
-      bytesTransferredKb: 0,
-      durationSeconds: 0,
-      packetsPerSecond: 0,
+      bytesTransferredKb: e.bytesTransferredKb,
+      durationSeconds: e.durationSeconds,
+      packetsPerSecond: e.packetsPerSecond,
       failedLogins: 0,
       anomalyScore: e.detectorConfidence,
       contextRiskScore: e.verificationConfidence,

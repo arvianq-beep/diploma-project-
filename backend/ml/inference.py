@@ -72,10 +72,10 @@ STABILITY_VARIANT_RECIPES: tuple[dict[str, float], ...] = (
 
 # Attack classification threshold.
 # CIC-IDS2017 has ~17 % attack samples; the RF raw probabilities for borderline
-# attack flows cluster in the 0.35–0.49 range.  A threshold of 0.35 captures
+# attack flows cluster in the 0.20–0.49 range.  A threshold of 0.20 captures
 # those flows without meaningfully increasing false positives on benign traffic
-# (which sits well below 0.25).  The verification layer provides the second gate.
-_ATTACK_THRESHOLD: float = 0.35
+# (which sits well below 0.15).  The verification layer provides the second gate.
+_ATTACK_THRESHOLD: float = 0.20
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

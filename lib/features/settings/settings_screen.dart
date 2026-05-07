@@ -76,12 +76,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (status == 'ok') {
         final samples = result['feedback_samples'] as int? ?? 0;
         final replay = result['replay_samples'] as int? ?? 0;
+        final epochs = result['epochs'] as int? ?? 0;
         final driftStatus =
             (result['drift'] as Map?)?['status'] as String? ?? 'n/a';
         setState(() {
           _retrainResult =
-              'Done — trained on $samples feedback + $replay replay samples. '
-              'Drift: $driftStatus.';
+              'Done — $samples feedback + $replay replay samples, $epochs epochs. '
+              'Drift: $driftStatus.\n\n'
+              'Model reloaded. Go to Analysis and re-submit events to see updated classifications.';
           _retrainError = false;
         });
       } else {
@@ -89,9 +91,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
         final found = result['found'] as int?;
         final required = result['required'] as int?;
         setState(() {
-          _retrainResult = reason == 'too_few_feedback_samples' && found != null
-              ? 'Skipped — only $found verdicts found, $required required.'
-              : 'Skipped: $reason.';
+          if (reason == 'no_artifact') {
+            _retrainResult =
+                'Skipped — verifier model artifact not found on disk.\n'
+                'Train the backend model first: cd backend && python -m verification.train_verifier';
+          } else if (reason == 'too_few_feedback_samples' && found != null) {
+            _retrainResult =
+                'Skipped — only $found verdicts found (need $required).\n'
+                'Submit more analyst verdicts from Event Details first.';
+          } else {
+            _retrainResult = 'Skipped: $reason.';
+          }
           _retrainError = false;
         });
       }
@@ -334,15 +344,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               if (crossDataset.isNotEmpty) ...[
                 const SizedBox(height: 10),
-                Text(
-                  'Detector cross-dataset accuracy: ${crossDataset['accuracy'] ?? 'n/a'}',
+                const Text(
+                  'Cross-dataset (UNSW-NB15 held-out):',
+                  style: TextStyle(fontWeight: FontWeight.w600),
                 ),
-                Text(
-                  'Detector cross-dataset F1-score: ${crossDataset['f1_score'] ?? 'n/a'}',
-                ),
-                Text(
-                  'Detector cross-dataset ROC-AUC: ${crossDataset['roc_auc'] ?? 'n/a'}',
-                ),
+                Text('  Accuracy: ${crossDataset['accuracy'] ?? 'n/a'}'),
+                Text('  Precision: ${crossDataset['precision'] ?? 'n/a'}'),
+                Text('  Recall: ${crossDataset['recall'] ?? 'n/a'}'),
+                Text('  F1-score: ${crossDataset['f1_score'] ?? 'n/a'}'),
+                Text('  ROC-AUC: ${crossDataset['roc_auc'] ?? 'n/a'}'),
               ],
               if (verifierTestMetrics.isNotEmpty) ...[
                 const SizedBox(height: 10),

@@ -43,6 +43,7 @@ MIGRATIONS = {
     "analyst_reviewed_at": "ALTER TABLE reports ADD COLUMN analyst_reviewed_at TEXT",
     "ai_explanation": "ALTER TABLE reports ADD COLUMN ai_explanation TEXT",
     "ai_recommendations": "ALTER TABLE reports ADD COLUMN ai_recommendations TEXT",
+    "ai_correlation_note": "ALTER TABLE reports ADD COLUMN ai_correlation_note TEXT",
 }
 
 
@@ -170,6 +171,50 @@ def update_report_explanation(report_id: int, explanation: str) -> bool:
     cursor = conn.execute(
         "UPDATE reports SET ai_explanation=? WHERE id=?",
         (explanation, report_id),
+    )
+    affected = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
+def get_recent_events_by_ip(src_ip: str, minutes: int = 10, limit: int = 20) -> list[dict]:
+    """Return recent reports whose event_snapshot.source_ip matches src_ip."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT id, created_at, final_status, confidence, event_snapshot, detector_output
+        FROM reports
+        WHERE json_extract(event_snapshot, '$.source_ip') = ?
+          AND created_at >= ?
+        ORDER BY created_at ASC
+        LIMIT ?
+        """,
+        (src_ip, cutoff, limit),
+    ).fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        item = dict(row)
+        for key in ("event_snapshot", "detector_output"):
+            raw = item.get(key)
+            if isinstance(raw, str) and raw:
+                try:
+                    item[key] = json.loads(raw)
+                except json.JSONDecodeError:
+                    pass
+        result.append(item)
+    return result
+
+
+def update_report_correlation_note(report_id: int, note: str) -> bool:
+    """Persist the LLM-generated cross-event correlation note for a report."""
+    conn = get_conn()
+    cursor = conn.execute(
+        "UPDATE reports SET ai_correlation_note=? WHERE id=?",
+        (note, report_id),
     )
     affected = cursor.rowcount
     conn.commit()

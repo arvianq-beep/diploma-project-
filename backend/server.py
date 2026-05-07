@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -46,6 +47,7 @@ from storage import (
     update_report_recommendations,
 )
 from verification.inference import SecureDecisionVerificationService
+from realtime.drift_detector import CUSUMDriftDetector
 
 
 app = Flask(__name__)
@@ -55,6 +57,7 @@ init_db()
 
 predictor: MLPredictor | None = None
 verifier: SecureDecisionVerificationService | None = None
+_analysis_drift = CUSUMDriftDetector()
 
 # ---------------------------------------------------------------------------
 # Real-time monitor — single global instance, created lazily on /start
@@ -186,7 +189,7 @@ def _normalize_event(event_payload: dict, fallback_id: str | None = None) -> dic
 # ---------------------------------------------------------------------------
 # LLM explanation (Ollama) — see llm_service.py for implementation.
 # ---------------------------------------------------------------------------
-from llm_service import enqueue_llm_artifacts, ollama_reachable
+from llm_service import enqueue_correlation_check, enqueue_llm_artifacts, ollama_reachable
 
 
 def _analysis_response(event_payload: dict) -> dict:
@@ -195,6 +198,7 @@ def _analysis_response(event_payload: dict) -> dict:
     normalized_event = _normalize_event(event_payload)
     detector_output = predictor_instance.predict_from_event(normalized_event)
     verification = verifier_instance.evaluate(normalized_event, detector_output)
+    drift_state = _analysis_drift.update(verification.verification_confidence)
 
     response = {
         "event_id": normalized_event["id"],
@@ -214,6 +218,16 @@ def _analysis_response(event_payload: dict) -> dict:
         "detector_model_version": verification.detector_model_version,
         "verifier_model_version": verification.verifier_model_version,
         "feature_snapshot": verification.feature_snapshot,
+        "sudden_drift": {
+            "drift_active": drift_state["drift_active"],
+            "cusum_s": drift_state["cusum_s"],
+            "total_alarms": drift_state["total_alarms"],
+            "in_warmup": drift_state["in_warmup"],
+            "recommendation": (
+                "Model may be operating under concept drift. "
+                "Review recent verdicts and trigger fine-tune via POST /api/v1/ml/verifier/fine-tune."
+            ) if drift_state["drift_active"] else None,
+        },
         "prediction": {
             "label": detector_output.label,
             "confidence": detector_output.confidence,
@@ -261,6 +275,7 @@ def _analysis_response(event_payload: dict) -> dict:
     )
     response["report_id"] = report_id
 
+    correlation_pending = False
     if llm_available:
         enqueue_llm_artifacts(
             report_id,
@@ -270,6 +285,10 @@ def _analysis_response(event_payload: dict) -> dict:
             verification.verification_confidence,
             response["prediction"],
         )
+        correlation_pending = enqueue_correlation_check(
+            report_id, normalized_event.get("source_ip", "")
+        )
+    response["correlation_pending"] = correlation_pending
 
     return response
 
@@ -281,6 +300,10 @@ def _csv_dict_reader_from_upload(file_storage):
 
 
 def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> dict:
+    # Strip whitespace from column names so CIC-IDS2017 columns like " Flow Duration"
+    # match the aliases in CIC_COLUMN_ALIASES (same normalization as preprocessing.py:65).
+    row = {k.strip(): v for k, v in row.items()}
+
     def normalize_protocol(value: str) -> str:
         normalized = str(value).strip()
         return {
@@ -298,7 +321,10 @@ def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> d
     def read_float(*keys, default=0.0):
         value = read(*keys, default=default)
         try:
-            return float(value)
+            v = float(value)
+            # Inf values (e.g. flow_bytes_per_s for 0-duration DDoS flows) must map to
+            # 0.0 — the training pipeline replaces inf→NaN→0 via _coerce_numeric.
+            return v if math.isfinite(v) else float(default)
         except (TypeError, ValueError):
             return float(default)
 
@@ -350,14 +376,43 @@ def _event_from_csv_row(row_index: int, row: dict[str, str], filename: str) -> d
     # Any feature resolved here will be picked up as a direct_feature in _normalize_event,
     # bypassing the lossy legacy compatibility approximation for that field.
     canonical_features: dict[str, float] = {}
+    # Track whether flow_duration came from the CIC-specific "Flow Duration" alias (µs).
+    _flow_duration_is_cic_us = False
     for canonical_name, aliases in CIC_COLUMN_ALIASES.items():
         for alias in aliases:
             if alias in row and str(row[alias]).strip() != "":
                 try:
-                    canonical_features[canonical_name] = max(float(row[alias]), 0.0)
+                    v = float(row[alias])
+                    # Inf → 0.0 to match training preprocessing (_coerce_numeric replaces inf with NaN then 0).
+                    canonical_features[canonical_name] = max(v if math.isfinite(v) else 0.0, 0.0)
+                    if canonical_name == "flow_duration" and alias != "flow_duration":
+                        # "Flow Duration", "duration", "dur" — all CIC/UNSW µs-scale aliases
+                        _flow_duration_is_cic_us = True
                 except (TypeError, ValueError):
                     pass
                 break
+
+    # CIC-IDS2017 and UNSW-NB15 store flow_duration in µs; harmonize_frame ALWAYS divides by 1e6.
+    # Apply unconditionally when the column came from a CIC-specific alias (not lowercase "flow_duration").
+    if _flow_duration_is_cic_us and "flow_duration" in canonical_features:
+        canonical_features["flow_duration"] /= 1_000_000.0
+
+    # Match preprocessing.py: recalculate rate features from totals when the CSV value was Inf→0
+    # (same as _coerce_numeric → replace(0, NaN) → fillna(calculated_rate) → fillna(0)).
+    _fd = canonical_features.get("flow_duration", 0.0)
+    if _fd > 0:
+        _total_bytes = (
+            canonical_features.get("total_length_fwd_packets", 0.0)
+            + canonical_features.get("total_length_bwd_packets", 0.0)
+        )
+        _total_pkts = (
+            canonical_features.get("total_fwd_packets", 0.0)
+            + canonical_features.get("total_bwd_packets", 0.0)
+        )
+        if canonical_features.get("flow_bytes_per_s", 0.0) == 0.0 and _total_bytes > 0:
+            canonical_features["flow_bytes_per_s"] = _total_bytes / _fd
+        if canonical_features.get("flow_packets_per_s", 0.0) == 0.0 and _total_pkts > 0:
+            canonical_features["flow_packets_per_s"] = _total_pkts / _fd
 
     event: dict = {
         "id": f"csv-{row_index}",
@@ -403,6 +458,7 @@ def root():
                 "/api/v1/datasets/<dataset_id>/analyze",
                 "/api/v1/reports",
                 "/api/v1/reports/export",
+                "/api/v1/drift/status",
             ],
         }
     )
@@ -533,12 +589,19 @@ def verifier_fine_tune():
     """
     from verification.online_learning import fine_tune
     body = request.get_json(silent=True) or {}
+    drift_state_before = _analysis_drift.state()
     result = fine_tune(
         hours=int(body.get("hours", 24)),
         min_samples=int(body.get("min_samples", 50)),
         epochs=int(body.get("epochs", 3)),
         learning_rate=float(body.get("learning_rate", 1e-4)),
     )
+    # After a successful fine-tune the verifier has adapted to the new distribution.
+    # Reset CUSUM so it re-establishes baseline from the next observations.
+    if result.get("status") == "ok":
+        _analysis_drift.reset()
+        result["cusum_reset"] = True
+        result["drift_was_active"] = drift_state_before.get("drift_active", False)
     # Reload the verifier so the updated weights are used immediately.
     global verifier
     verifier = None
@@ -819,6 +882,23 @@ def realtime_debug():
     if monitor is None:
         return jsonify({"monitor": None, "running": False}), 200
     return jsonify(monitor.status()), 200
+
+
+@app.get("/api/v1/drift/status")
+def drift_status():
+    """CUSUM sudden-drift detector state for both analysis and monitor modes."""
+    monitor = _get_monitor()
+    return jsonify({
+        "analysis_mode": _analysis_drift.state(),
+        "monitor_mode": monitor.status().get("drift") if monitor else None,
+    }), 200
+
+
+@app.post("/api/v1/drift/reset")
+def drift_reset():
+    """Reset analysis-mode CUSUM accumulators (keeps learned baseline)."""
+    _analysis_drift.reset()
+    return jsonify({"status": "reset", "state": _analysis_drift.state()}), 200
 
 
 @app.get("/api/realtime/interfaces")

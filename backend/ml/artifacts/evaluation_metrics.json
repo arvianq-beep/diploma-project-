@@ -20,7 +20,7 @@
     },
     "cic_files": [
       {
-        "file": "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX_normalized_binary.csv",
+        "file": "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX_normalized.csv",
         "rows": 225745,
         "rows_after_dedup": 223112,
         "columns": [
@@ -102,8 +102,7 @@
           "idle_std",
           "idle_max",
           "idle_min",
-          "label",
-          "original_label"
+          "label"
         ],
         "label_column": "label",
         "missing_values_before_cleaning": 4,
@@ -111,8 +110,8 @@
         "inf_values": 64,
         "duplicate_rows_removed": 2633,
         "raw_label_distribution": {
-          "1": 128016,
-          "0": 95096
+          "DDoS": 128016,
+          "BENIGN": 95096
         },
         "binary_label_distribution": {
           "0": 95096,
@@ -120,7 +119,7 @@
         }
       },
       {
-        "file": "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX_normalized_binary.csv",
+        "file": "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX_normalized.csv",
         "rows": 286467,
         "rows_after_dedup": 214114,
         "columns": [
@@ -202,8 +201,7 @@
           "idle_std",
           "idle_max",
           "idle_min",
-          "label",
-          "original_label"
+          "label"
         ],
         "label_column": "label",
         "missing_values_before_cleaning": 15,
@@ -211,8 +209,8 @@
         "inf_values": 727,
         "duplicate_rows_removed": 72353,
         "raw_label_distribution": {
-          "0": 123295,
-          "1": 90819
+          "BENIGN": 123295,
+          "PortScan": 90819
         },
         "binary_label_distribution": {
           "0": 123295,
@@ -220,7 +218,7 @@
         }
       },
       {
-        "file": "Friday-WorkingHours-Morning.pcap_ISCX_normalized_binary.csv",
+        "file": "Friday-WorkingHours-Morning.pcap_ISCX_normalized.csv",
         "rows": 191033,
         "rows_after_dedup": 184145,
         "columns": [
@@ -302,8 +300,7 @@
           "idle_std",
           "idle_max",
           "idle_min",
-          "label",
-          "original_label"
+          "label"
         ],
         "label_column": "label",
         "missing_values_before_cleaning": 28,
@@ -311,8 +308,8 @@
         "inf_values": 216,
         "duplicate_rows_removed": 6888,
         "raw_label_distribution": {
-          "0": 182192,
-          "1": 1953
+          "BENIGN": 182192,
+          "Bot": 1953
         },
         "binary_label_distribution": {
           "0": 182192,
@@ -320,7 +317,7 @@
         }
       },
       {
-        "file": "Monday-WorkingHours.pcap_ISCX_normalized_binary.csv",
+        "file": "Monday-WorkingHours.pcap_ISCX_normalized.csv",
         "rows": 529918,
         "rows_after_dedup": 502983,
         "columns": [
@@ -402,8 +399,7 @@
           "idle_std",
           "idle_max",
           "idle_min",
-          "label",
-          "original_label"
+          "label"
         ],
         "label_column": "label",
         "missing_values_before_cleaning": 64,
@@ -411,14 +407,14 @@
         "inf_values": 810,
         "duplicate_rows_removed": 26935,
         "raw_label_distribution": {
-          "0": 502983
+          "BENIGN": 502983
         },
         "binary_label_distribution": {
           "0": 502983
         }
       },
       {
-        "file": "Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX_normalized_binary.csv",
+        "file": "Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX_normalized.csv",
         "rows": 288602,
         "rows_after_dedup": 252972,
         "columns": [
@@ -500,8 +496,7 @@
           "idle_std",
           "idle_max",
           "idle_min",
-          "label",
-          "original_label"
+          "label"
         ],
         "label_column": "label",
         "missing_values_before_cleaning": 18,
@@ -509,8 +504,8 @@
         "inf_values": 396,
         "duplicate_rows_removed": 35630,
         "raw_label_distribution": {
-          "0": 252936,
-          "1": 36
+          "BENIGN": 252936,
+          "Infiltration": 36
         },
         "binary_label_distribution": {
           "0": 252936,
@@ -518,7 +513,7 @@
         }
       },
       {
-        "file": "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX_normalized_binary.csv",
+        "file": "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX_normalized.csv",
         "rows": 170366,
         "rows_after_dedup": 164300,
         "columns": [
@@ -600,8 +595,7 @@
           "idle_std",
           "idle_max",
           "idle_min",
-          "label",
-          "original_label"
+          "label"
         ],
         "label_column": "label",
         "missing_values_before_cleaning": 20,
@@ -609,8 +603,10 @@
         "inf_values": 250,
         "duplicate_rows_removed": 6066,
         "raw_label_distribution": {
-          "0": 162157,
-          "1": 2143
+          "BENIGN": 162157,
+          "Web Attack \ufffd Brute Force": 1470,
+          "Web Attack \ufffd XSS": 652,
+          "Web Attack \ufffd Sql Injection": 21
         },
         "binary_label_distribution": {
           "0": 162157,
@@ -618,7 +614,7 @@
         }
       },
       {
-        "file": "Tuesday-WorkingHours.pcap_ISCX_normalized_binary.csv",
+        "file": "Tuesday-WorkingHours.pcap_ISCX_normalized.csv",
         "rows": 445909,
         "rows_after_dedup": 421844,
         "columns": [
@@ -700,8 +696,7 @@
           "idle_std",
           "idle_max",
           "idle_min",
-          "label",
-          "original_label"
+          "label"
         ],
         "label_column": "label",
         "missing_values_before_cleaning": 201,
@@ -709,8 +704,9 @@
         "inf_values": 327,
         "duplicate_rows_removed": 24065,
         "raw_label_distribution": {
-          "0": 412692,
-          "1": 9152
+          "BENIGN": 412692,
+          "FTP-Patator": 5933,
+          "SSH-Patator": 3219
         },
         "binary_label_distribution": {
           "0": 412692,
@@ -718,7 +714,7 @@
         }
       },
       {
-        "file": "Wednesday-workingHours.pcap_ISCX_normalized_binary.csv",
+        "file": "Wednesday-workingHours.pcap_ISCX_normalized.csv",
         "rows": 692703,
         "rows_after_dedup": 610794,
         "columns": [
@@ -800,8 +796,7 @@
           "idle_std",
           "idle_max",
           "idle_min",
-          "label",
-          "original_label"
+          "label"
         ],
         "label_column": "label",
         "missing_values_before_cleaning": 1008,
@@ -809,8 +804,12 @@
         "inf_values": 1586,
         "duplicate_rows_removed": 81909,
         "raw_label_distribution": {
-          "0": 417035,
-          "1": 193759
+          "BENIGN": 417035,
+          "DoS Hulk": 172849,
+          "DoS GoldenEye": 10286,
+          "DoS slowloris": 5385,
+          "DoS Slowhttptest": 5228,
+          "Heartbleed": 11
         },
         "binary_label_distribution": {
           "0": 417035,
@@ -820,65 +819,65 @@
     ]
   },
   "validation": {
-    "accuracy": 0.9988,
-    "precision": 0.9945,
-    "recall": 0.9982,
-    "attack_recall": 0.9982,
-    "f1_score": 0.9964,
-    "false_positive_rate": 0.0011,
-    "false_positives": 374,
-    "predicted_attack_ratio": 0.1695,
-    "roc_auc": 1.0,
+    "accuracy": 0.9987,
+    "precision": 0.9936,
+    "recall": 0.999,
+    "attack_recall": 0.999,
+    "f1_score": 0.9963,
+    "false_positive_rate": 0.0013,
+    "false_positives": 436,
+    "predicted_attack_ratio": 0.1697,
+    "roc_auc": 0.9999,
     "pr_auc": 0.9998,
     "confusion_matrix": {
-      "tn": 335064,
-      "fp": 374,
-      "fn": 122,
-      "tp": 68018
+      "tn": 335002,
+      "fp": 436,
+      "fn": 71,
+      "tp": 68069
     }
   },
   "test": {
-    "accuracy": 0.9988,
-    "precision": 0.9944,
-    "recall": 0.9985,
-    "attack_recall": 0.9985,
-    "f1_score": 0.9965,
-    "false_positive_rate": 0.0011,
-    "false_positives": 475,
-    "predicted_attack_ratio": 0.1695,
+    "accuracy": 0.9987,
+    "precision": 0.9934,
+    "recall": 0.9991,
+    "attack_recall": 0.9991,
+    "f1_score": 0.9962,
+    "false_positive_rate": 0.0014,
+    "false_positives": 569,
+    "predicted_attack_ratio": 0.1698,
     "roc_auc": 1.0,
     "pr_auc": 0.9998,
     "confusion_matrix": {
-      "tn": 418822,
-      "fp": 475,
-      "fn": 130,
-      "tp": 85046
+      "tn": 418728,
+      "fp": 569,
+      "fn": 76,
+      "tp": 85100
     }
   },
-  "train_rows": 1614311,
+  "train_rows": 3699732,
   "validation_rows": 403578,
   "test_rows": 504473,
   "cross_dataset": {
-    "accuracy": 0.9687,
-    "precision": 0.0,
-    "recall": 0.0,
-    "attack_recall": 0.0,
-    "f1_score": 0.0,
-    "false_positive_rate": 0.0,
-    "false_positives": 1,
-    "predicted_attack_ratio": 0.0,
-    "roc_auc": 0.6453,
-    "pr_auc": 0.0579,
+    "accuracy": 0.9826,
+    "precision": 0.6437,
+    "recall": 0.9916,
+    "attack_recall": 0.9916,
+    "f1_score": 0.7807,
+    "false_positive_rate": 0.0177,
+    "false_positives": 8942,
+    "predicted_attack_ratio": 0.0481,
+    "roc_auc": 0.9972,
+    "pr_auc": 0.9104,
     "confusion_matrix": {
-      "tn": 2525313,
-      "fp": 1,
-      "fn": 81463,
-      "tp": 0
+      "tn": 496121,
+      "fp": 8942,
+      "fn": 137,
+      "tp": 16156
     },
-    "dataset": "unsw_nb15_augmented",
-    "rows": 2606777,
+    "dataset": "unsw_nb15_held_out",
+    "rows": 521356,
     "source_files": [
-      "CICFlowMeter_out_normalized_binary.csv"
+      "CICFlowMeter_out_normalized.csv"
     ]
   }
 }

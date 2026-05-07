@@ -37,10 +37,11 @@ from collections import deque
 from dataclasses import asdict, dataclass
 from typing import Any, Deque, Iterator
 
-from llm_service import enqueue_llm_artifacts
+from llm_service import enqueue_correlation_check, enqueue_llm_artifacts
 from storage import insert_report
 
 from .capture import BaseCapture, make_capture_source
+from .drift_detector import CUSUMDriftDetector
 from .flow import FlowAggregator, FlowRecord, RawPacket
 
 
@@ -88,6 +89,19 @@ class StreamResult:
 
     def to_sse_dict(self) -> dict[str, Any]:
         """Compact representation for SSE / JSON serialisation."""
+        snap = self.feature_snapshot
+        # flow_duration is stored in microseconds in CIC-IDS2017 canonical features.
+        # Values > 1000 are assumed to be microseconds; smaller values are already seconds.
+        _dur_raw = snap.get("flow_duration", 0.0)
+        _duration_s = _dur_raw / 1_000_000.0 if _dur_raw > 1000 else _dur_raw
+        _fwd_bytes = snap.get("total_length_fwd_packets", 0.0)
+        _bwd_bytes = snap.get("total_length_bwd_packets", 0.0)
+        _bytes_kb = (_fwd_bytes + _bwd_bytes) / 1024.0
+        if _bytes_kb == 0.0:
+            _bps = snap.get("flow_bytes_per_s", 0.0)
+            if _bps > 0 and _duration_s > 0:
+                _bytes_kb = (_bps * _duration_s) / 1024.0
+        _pkts_per_s = snap.get("flow_packets_per_s", 0.0)
         return {
             "processed_at": self.processed_at,
             "src_ip": self.src_ip,
@@ -106,6 +120,9 @@ class StreamResult:
             "verification_summary": self.verification_summary,
             "report_id": self.report_id,
             "explanation_pending": self.report_id is not None,
+            "bytes_transferred_kb": round(_bytes_kb, 2),
+            "duration_seconds": round(_duration_s, 4),
+            "packets_per_second": round(_pkts_per_s, 2),
         }
 
 
@@ -188,6 +205,8 @@ class StreamMonitor:
         self._packets_received: int = 0
         self._flows_completed: int = 0
         self._capture_error: str | None = None
+
+        self._drift_detector = CUSUMDriftDetector()
 
     # ------------------------------------------------------------------
     # Public API
@@ -275,6 +294,7 @@ class StreamMonitor:
             "capture_error": self._capture_error,
             "capture_thread_alive": self._capture_thread.is_alive() if self._capture_thread else False,
             "inference_thread_alive": self._inference_thread.is_alive() if self._inference_thread else False,
+            "drift": self._drift_detector.state(),
         }
 
     # ------------------------------------------------------------------
@@ -496,12 +516,25 @@ class StreamMonitor:
                             "triggered_indicators": result.triggered_indicators,
                         },
                     )
+                    enqueue_correlation_check(result.report_id, result.src_ip)
             except Exception:
                 pass  # DB failure must not break the realtime stream
 
             results.append(result)
             self._buffer.append(result)
             self._emit(result)
+
+        if results:
+            mean_ver_conf = sum(r.verification_confidence for r in results) / len(results)
+            drift_state = self._drift_detector.update(mean_ver_conf)
+            if drift_state["alarmed_now"]:
+                print(
+                    f"[drift] SUDDEN DRIFT DETECTED: "
+                    f"batch #{drift_state['observations']} "
+                    f"mean_verification_confidence={mean_ver_conf:.3f} "
+                    f"cusum_s={drift_state['cusum_s']:.3f}",
+                    file=sys.stderr,
+                )
 
     # ------------------------------------------------------------------
     # Output
